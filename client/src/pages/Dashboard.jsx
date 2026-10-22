@@ -87,12 +87,13 @@ export default function Dashboard() {
 
       {error && <div className="error-box">{error}</div>}
 
-      {/* Top 4 Metric Cards */}
-      <div className="metric-grid">
+      {/* Workspace summary cards */}
+      <div className={`metric-grid ${['TL', 'SL'].includes(user?.role) ? 'dashboard-lead-metrics' : ''}`}>
         {metric('Total Tickets', ticketStats?.total, 'Active workspace records', Ticket, 'blue', '/tickets')}
         {metric('Open Tickets', ticketStats?.open, `${ticketStats?.unassigned || 0} awaiting assignment`, Clock3, 'orange', '/tickets')}
         {metric('Resolved Tickets', ticketStats?.closed, 'Completed in OpsDesk', CheckCircle2, 'green', '/tickets')}
         {metric('Aging Tickets', ticketStats?.aging, `Oldest open: ${ticketStats?.oldestAge || 0} days`, AlertTriangle, 'orange', '/tickets')}
+        {['TL', 'SL'].includes(user?.role) && metric('Unassigned Tasks', summary?.unassignedTasks, 'Tasks waiting for an engineer', ClipboardList, 'purple', '/tasks?unassigned=true')}
       </div>
 
       {/* Middle Dashboard Grid: Chart & My Pulse */}

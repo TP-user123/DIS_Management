@@ -14,6 +14,7 @@ import notificationRoutes from './routes/notifications.js';
 import reportRoutes from './routes/reports.js';
 import workReportRoutes from './routes/workReports.js';
 import engineerIssueRoutes from './routes/engineerIssues.js';
+import assetRoutes from './routes/assets.js';
 
 const app = express();
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
@@ -30,6 +31,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/work-reports', workReportRoutes);
 app.use('/api/engineer-issues', engineerIssueRoutes);
+app.use('/api/assets', assetRoutes);
 app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(err.status || 500).json({ message: err.message || 'Internal server error' });

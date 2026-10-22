@@ -11,7 +11,9 @@ import {
   Ticket,
   UserRound,
   AlertCircle,
-  LockKeyhole
+  LockKeyhole,
+  FileBarChart2,
+  Laptop
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useEffect, useState } from 'react';
@@ -23,8 +25,10 @@ const links = [
   { to: '/tickets', label: 'Ticket queue', icon: Ticket, permission: 'tickets:view' },
   { to: '/tasks', label: 'Operational tasks', icon: ClipboardList, permission: 'tasks:view' },
   { to: '/events', label: 'Events & schedules', icon: CalendarDays, permission: 'events:view' },
+  { to: '/assets', label: 'Asset desk', icon: Laptop },
+  { to: '/reports', label: 'Work tracker', icon: FileBarChart2 },
   { to: '/handovers', label: 'Handovers', icon: Workflow, permission: 'tasks:view', permission2: 'tasks:handover' },
-  { to: '/issues', label: 'Engineer Issues', icon: AlertCircle }, // Replaced Work Reports with private 1-to-1 Engineer Issues
+  { to: '/issues', label: 'Engineer Issues', icon: AlertCircle },
   { to: '/profile', label: 'My profile', icon: UserRound },
   { to: '/team', label: 'Team & access', icon: Users, permission: 'team:view', lead: true }
 ];
@@ -147,6 +151,8 @@ export default function Layout() {
                   ? 'Notifications'
                   : loc.pathname === '/issues'
                   ? 'Engineer Issues'
+                  : loc.pathname === '/assets'
+                  ? 'Asset desk'
                   : 'Workspace')}
             </strong>
           </div>

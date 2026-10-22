@@ -17,6 +17,7 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Modal from '../components/Modal.jsx';
 import Swal from '../utils/swal.js';
+import { useSearchParams } from 'react-router-dom';
 
 const emptyTaskForm = {
   title: '',
@@ -32,6 +33,7 @@ const emptyTaskForm = {
 
 export default function Tasks() {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const currentUserId = String(user?.id || user?._id || '');
   const isLead = ['MANAGER', 'TL', 'SL'].includes(user?.role);
   const canCreate = user?.role === 'MANAGER' || (user?.permissions || []).includes('tasks:create');
@@ -42,6 +44,7 @@ export default function Tasks() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [mineOnly, setMineOnly] = useState(false);
+  const [unassignedOnly, setUnassignedOnly] = useState(searchParams.get('unassigned') === 'true');
 
   // Create Task Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -73,7 +76,8 @@ export default function Tasks() {
       params: {
         search,
         status: statusFilter,
-        assignedToMe: mineOnly ? 'true' : 'false'
+        assignedToMe: mineOnly ? 'true' : 'false',
+        unassigned: unassignedOnly ? 'true' : 'false'
       }
     })
       .then((r) => setItems(r.data))
@@ -85,7 +89,11 @@ export default function Tasks() {
     api.get('/team')
       .then((r) => setMembers(r.data.filter((u) => u.status === 'active')))
       .catch(() => {});
-  }, [search, statusFilter, mineOnly]);
+  }, [search, statusFilter, mineOnly, unassignedOnly]);
+
+  useEffect(() => {
+    setUnassignedOnly(searchParams.get('unassigned') === 'true');
+  }, [searchParams]);
 
   // Create Task
   const handleCreate = async (e) => {
@@ -258,11 +266,27 @@ export default function Tasks() {
           </div>
 
           <div className="filter-controls">
+            {isLead && <label className="toggle-filter">
+              <input type="checkbox" checked={unassignedOnly} onChange={(e) => {
+                const enabled = e.target.checked;
+                setUnassignedOnly(enabled);
+                if (enabled) setMineOnly(false);
+                setSearchParams(enabled ? { unassigned: 'true' } : {});
+              }} />{' '}
+              Unassigned only
+            </label>}
             <label className="toggle-filter">
               <input
                 type="checkbox"
                 checked={mineOnly}
-                onChange={(e) => setMineOnly(e.target.checked)}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  setMineOnly(enabled);
+                  if (enabled && unassignedOnly) {
+                    setUnassignedOnly(false);
+                    setSearchParams({});
+                  }
+                }}
               />{' '}
               Assigned to me
             </label>

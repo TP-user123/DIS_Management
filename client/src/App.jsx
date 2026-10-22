@@ -13,6 +13,8 @@ import Profile from './pages/Profile.jsx';
 import EngineerIssues from './pages/EngineerIssues.jsx';
 import ForgotPassword from './pages/ForgotPassword.jsx';
 import ResetPassword from './pages/ResetPassword.jsx';
+import Assets from './pages/Assets.jsx';
+import Reports from './pages/Reports.jsx';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -88,6 +90,7 @@ export default function App() {
             </PermissionOnly>
           }
         />
+        <Route path="assets" element={<Assets />} />
         <Route
           path="handovers"
           element={
@@ -100,8 +103,7 @@ export default function App() {
         />
         {/* Confidential 1-to-1 Engineer Issues */}
         <Route path="issues" element={<EngineerIssues />} />
-        {/* Graceful redirect from legacy reports */}
-        <Route path="reports" element={<Navigate to="/issues" replace />} />
+        <Route path="reports" element={<Reports />} />
         <Route
           path="notifications"
           element={

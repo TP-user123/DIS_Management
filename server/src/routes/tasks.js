@@ -13,6 +13,7 @@ router.get('/', asyncHandler(async (req, res) => {
   if (req.query.status && req.query.status !== 'ALL') filter.status = req.query.status;
   if (req.query.priority && req.query.priority !== 'ALL') filter.priority = req.query.priority;
   if (req.query.assignedToMe === 'true') filter.assigneeId = req.user._id;
+  if (req.query.unassigned === 'true' && ['MANAGER', 'TL', 'SL'].includes(req.user.role)) filter.assigneeId = null;
   if (req.query.search) filter.title = { $regex: req.query.search, $options: 'i' };
 
   const tasks = await Task.find(filter).sort({ updatedAt: -1 }).limit(500).lean();

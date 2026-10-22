@@ -19,6 +19,61 @@ const workReportSchema = new Schema({ ...base, userId: { type: Schema.Types.Obje
 const engineerIssueSchema = new Schema({ ...base, engineerId: { type: Schema.Types.ObjectId, required: true, ref: 'User' }, tlId: { type: Schema.Types.ObjectId, default: null, ref: 'User' }, team: { type: String, default: 'IT Support' }, title: { type: String, required: true, trim: true }, category: { type: String, enum: ['TECHNICAL_BLOCKER','TOOLING_ACCESS','WORKLOAD_SHIFT','PROCESS','OTHER'], default: 'TECHNICAL_BLOCKER' }, priority: { type: String, enum: ['CRITICAL','HIGH','MEDIUM','LOW'], default: 'MEDIUM' }, description: { type: String, required: true }, status: { type: String, enum: ['OPEN','IN_REVIEW','RESOLVED'], default: 'OPEN' }, tlNotes: { type: String, default: '' }, resolvedAt: { type: Date, default: null }, resolvedBy: { type: Schema.Types.ObjectId, default: null, ref: 'User' } }, { timestamps: true });
 engineerIssueSchema.index({ companyId: 1, engineerId: 1 });
 engineerIssueSchema.index({ companyId: 1, tlId: 1 });
+const repeatedAssetIssueSchema = new Schema({
+  issue: { type: String, trim: true, required: true },
+  count: { type: Number, default: 0 },
+  status: { type: String, enum: ['OPEN', 'RESOLVED'], default: 'OPEN' },
+  firstReportedAt: { type: Date, default: Date.now },
+  lastReportedAt: { type: Date, default: Date.now },
+  resolvedAt: { type: Date, default: null }
+}, { _id: false });
+const assetSchema = new Schema({
+  ...base,
+  assetId: { type: String, required: true, trim: true },
+  assetKey: { type: String, required: true, trim: true },
+  userName: { type: String, trim: true, default: '' },
+  employeeId: { type: String, trim: true, default: '' },
+  project: { type: String, trim: true, default: '' },
+  issue: { type: String, trim: true, default: '' },
+  systemType: { type: String, enum: ['', 'SOE', 'MTC 22', 'MTC 21', '440', '445'], default: '' },
+  status: { type: String, enum: ['RECEIVED', 'IN_PROGRESS', 'READY_FOR_PICKUP', 'RETURNED'], default: 'RECEIVED' },
+  isArchived: { type: Boolean, default: false },
+  archivedAt: { type: Date, default: null },
+  archivedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+  assignedToId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+  eventId: { type: Schema.Types.ObjectId, ref: 'AssetWorkEvent', default: null },
+  expectedPickupAt: { type: Date, default: null },
+  lastUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  returnedAt: { type: Date, default: null },
+  lastCompletedAt: { type: Date, default: null },
+  lastCompletedIssue: { type: String, trim: true, default: '' },
+  repeatIssueCount: { type: Number, default: 0 },
+  repeatIssues: { type: [repeatedAssetIssueSchema], default: [] }
+}, { timestamps: true });
+assetSchema.index({ companyId: 1, assetKey: 1 }, { unique: true });
+assetSchema.index({ companyId: 1, status: 1, updatedAt: -1 });
+const assetWorkEventSchema = new Schema({
+  ...base,
+  title: { type: String, required: true, trim: true },
+  description: { type: String, default: '' },
+  scheduledAt: { type: Date, default: null },
+  assetCount: { type: Number, default: 0 },
+  assignedUserIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+  createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  isArchived: { type: Boolean, default: false },
+  archivedAt: { type: Date, default: null },
+  archivedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null }
+}, { timestamps: true });
+const assetHistorySchema = new Schema({
+  ...base,
+  assetId: { type: Schema.Types.ObjectId, ref: 'Asset', required: true },
+  action: { type: String, required: true },
+  performedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  eventId: { type: Schema.Types.ObjectId, ref: 'AssetWorkEvent', default: null },
+  changes: { type: Schema.Types.Mixed, default: {} },
+  comment: { type: String, default: '' }
+}, { timestamps: true });
+assetHistorySchema.index({ companyId: 1, assetId: 1, createdAt: -1 });
 export const Company = model('Company', companySchema);
 export const User = model('User', userSchema);
 export const Case = model('Case', caseSchema);
@@ -30,3 +85,6 @@ export const Notification = model('Notification', notificationSchema);
 export const Event = model('Event', eventSchema);
 export const WorkReport = model('WorkReport', workReportSchema);
 export const EngineerIssue = model('EngineerIssue', engineerIssueSchema);
+export const Asset = model('Asset', assetSchema);
+export const AssetWorkEvent = model('AssetWorkEvent', assetWorkEventSchema);
+export const AssetHistory = model('AssetHistory', assetHistorySchema);
