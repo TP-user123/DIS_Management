@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, CalendarDays, CheckCircle2, ClipboardList, Download, FileText,
-  Handshake, ListChecks, RefreshCw, Send, UserRound, Users
+  Handshake, Laptop, RefreshCw, Send, UserRound, Users
 } from 'lucide-react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import LoadingState from '../components/LoadingState.jsx';
 import Swal from '../utils/swal.js';
 
 function localDate(date) {
@@ -37,11 +38,13 @@ function csvCell(value) {
 
 function exportReport(report, selectedUserId, period) {
   const userRows = report.users.map((member) => [
-    member.name, member.role, member.team, member.shift, member.workCount,
-    member.assignedTaskCount, member.incompleteTaskCount, member.completedTaskCount, member.handoverCount
+    member.name, member.role, member.team, member.shift,
+    member.assetIssuesCompleted, member.assetIssuesPending,
+    member.ticketResolvedCount, member.ticketPendingCount, member.walkInIssueCount,
+    (member.assignedEvents || []).map((event) => event.title).join('; ')
   ]);
   const rows = [
-    ['User', 'Role', 'Team', 'Shift', 'Work entries', 'Assigned tasks', 'Incomplete tasks', 'Completed in range', 'Handovers'],
+    ['User', 'Role', 'Team', 'Shift', 'Asset issues resolved total', 'Asset issues pending', 'Tickets resolved', 'Tickets pending', 'Walk-in issues in range', 'Assigned events in range'],
     ...userRows
   ];
   const selected = report.users.find((member) => String(member._id) === String(selectedUserId));
@@ -131,8 +134,6 @@ export default function Reports() {
     return [...groups.values()].sort((a, b) => new Date(b.entries[0]?.createdAt || 0) - new Date(a.entries[0]?.createdAt || 0));
   }, [selectedMember]);
 
-  const scrollToWorkDetail = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
   const setToday = () => {
     const value = localDate(new Date());
     setPeriod('today');
@@ -216,17 +217,20 @@ export default function Reports() {
       </section>
 
       {error && <div className="error-box">{error}</div>}
-      {loading && <div className="panel work-loading"><RefreshCw size={17} /> Loading activity…</div>}
+      {loading && <LoadingState title="Loading work tracker" detail="Collecting assignments, work history and issue credits." />}
 
       {!loading && report && <>
         {reportUserId === 'all' && <section className="panel table-panel work-members-panel">
           <div className="panel-heading"><div><h2>Team report</h2><p>Select a person to open their activity, assignments and handovers for {dateCaption}.</p></div><span className="count-pill">{members.length} people</span></div>
           {members.length ? <div className="table-scroll"><table>
-            <thead><tr><th>TEAM MEMBER</th><th>ROLE / TEAM</th><th>WORK ENTRIES</th><th>ASSIGNED</th><th>INCOMPLETE</th><th>COMPLETED</th><th>HANDOVERS</th></tr></thead>
+            <thead><tr><th>TEAM MEMBER</th><th>ROLE / TEAM</th><th>ASSET ISSUES</th><th>TICKETS</th><th>WALK-IN</th><th>EVENTS</th></tr></thead>
             <tbody>{members.map((member) => <tr key={member._id} className={selectedUserId === String(member._id) ? 'row-selected' : ''} onClick={() => setSelectedUserId(String(member._id))}>
               <td><button className="work-person-link" onClick={() => setSelectedUserId(String(member._id))}><span className="report-avatar">{member.name.slice(0, 1).toUpperCase()}</span><strong>{member.name}</strong></button></td>
               <td>{member.role}<small className="work-table-sub">{member.team}{member.shift ? ` · ${member.shift}` : ''}</small></td>
-              <td>{member.workCount}</td><td>{member.assignedTaskCount}</td><td><span className={member.incompleteTaskCount ? 'work-number-warn' : ''}>{member.incompleteTaskCount}</span></td><td>{member.completedTaskCount}</td><td>{member.handoverCount}</td>
+              <td><span className="work-count-good">Completed {member.assetIssuesCompleted}</span><small className={member.assetIssuesPending ? 'work-number-warn work-table-sub' : 'work-table-sub'}>Pending {member.assetIssuesPending}</small></td>
+              <td><span className="work-count-good">Resolved {member.ticketResolvedCount}</span><small className={member.ticketPendingCount ? 'work-number-warn work-table-sub' : 'work-table-sub'}>Pending {member.ticketPendingCount} of {member.ticketCount}</small></td>
+              <td>{member.walkInIssueCount}</td>
+              <td><span>{member.eventCount}</span>{member.assignedEvents?.length > 0 && <small className="work-table-sub">{member.assignedEvents.map((event) => event.title).join(', ')}</small>}</td>
             </tr>)}</tbody>
           </table></div> : <div className="empty-state compact"><Users size={22} /><strong>No visible team members</strong><p>No activity is available for the selected scope.</p></div>}
         </section>}
@@ -238,13 +242,15 @@ export default function Reports() {
             <button className="btn btn-secondary btn-sm" onClick={() => setReportUserId(String(selectedMember._id))}>View this user only</button>
           </section>
 
-          <div className="metric-grid work-metric-grid">
-            <button type="button" className="metric-card work-metric-card" onClick={() => scrollToWorkDetail('work-entries-detail')}><div className="metric-top">Work entries <span className="metric-icon blue"><Activity size={17} /></span></div><div className="metric-value">{selectedMember.workCount}</div><div className="metric-note">Task, ticket, asset, handover and work log activity</div></button>
-            <button type="button" className="metric-card work-metric-card" onClick={() => scrollToWorkDetail('assigned-tasks-detail')}><div className="metric-top">Assigned tasks <span className="metric-icon purple"><ClipboardList size={17} /></span></div><div className="metric-value">{selectedMember.assignedTaskCount}</div><div className="metric-note">Currently assigned to this user</div></button>
-            <button type="button" className="metric-card work-metric-card" onClick={() => scrollToWorkDetail('incomplete-tasks-detail')}><div className="metric-top">Incomplete <span className="metric-icon orange"><ListChecks size={17} /></span></div><div className="metric-value">{selectedMember.incompleteTaskCount}</div><div className="metric-note">Tasks still open or in progress</div></button>
-            <button type="button" className="metric-card work-metric-card" onClick={() => scrollToWorkDetail('completed-tasks-detail')}><div className="metric-top">Completed <span className="metric-icon green"><CheckCircle2 size={17} /></span></div><div className="metric-value">{selectedMember.completedTaskCount}</div><div className="metric-note">Tasks completed in this period</div></button>
-            <button type="button" className="metric-card work-metric-card" onClick={() => scrollToWorkDetail('handovers-detail')}><div className="metric-top">Handovers <span className="metric-icon green"><Handshake size={17} /></span></div><div className="metric-value">{selectedMember.handoverCount}</div><div className="metric-note">Sent, received or accepted in this period</div></button>
-          </div>
+          <section className="workload-overview" aria-label={`Work summary for ${selectedMember.name}`}>
+            <div className="workload-overview-heading"><div><h3>Current workload</h3><p>Asset completion credit is lifetime; pending counts show current assignments. Tickets show their current status.</p></div><span className="work-period-badge">{dateCaption}</span></div>
+            <div className="metric-grid work-metric-grid">
+              <article className="metric-card workload-card"><div className="metric-top">Asset issues <span className="metric-icon green"><CheckCircle2 size={17} /></span></div><div className="workload-count-pair"><span><strong>{selectedMember.assetIssuesCompleted}</strong><small>Completed total</small></span><span><strong>{selectedMember.assetIssuesPending}</strong><small>Pending now</small></span></div></article>
+              <article className="metric-card workload-card"><div className="metric-top">Tickets <span className="metric-icon blue"><ClipboardList size={17} /></span></div><div className="workload-count-pair"><span><strong>{selectedMember.ticketResolvedCount}</strong><small>Resolved</small></span><span><strong>{selectedMember.ticketPendingCount}</strong><small>Pending</small></span></div><div className="metric-note">{selectedMember.ticketCount} currently assigned</div></article>
+              <article className="metric-card workload-card"><div className="metric-top">Walk-in issues <span className="metric-icon orange"><Laptop size={17} /></span></div><div className="metric-value">{selectedMember.walkInIssueCount}</div><div className="metric-note">Active walk-ins plus issues handled in this period</div></article>
+              <article className="metric-card workload-card"><div className="metric-top">Assigned events <span className="metric-icon purple"><CalendarDays size={17} /></span></div><div className="metric-value">{selectedMember.eventCount}</div><div className="work-event-titles">{selectedMember.assignedEvents?.length ? selectedMember.assignedEvents.map((event) => <span key={event._id}>{event.title}</span>) : <span>No events assigned in this period</span>}</div></article>
+            </div>
+          </section>
 
           <div className="report-grid work-detail-grid">
             <section id="assigned-tasks-detail" className="panel work-detail-panel work-drilldown-panel">

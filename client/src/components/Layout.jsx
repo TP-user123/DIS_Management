@@ -13,7 +13,9 @@ import {
   AlertCircle,
   LockKeyhole,
   FileBarChart2,
-  Laptop
+  Laptop,
+  Menu,
+  X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useEffect, useState } from 'react';
@@ -38,6 +40,11 @@ export default function Layout() {
   const nav = useNavigate();
   const loc = useLocation();
   const [unread, setUnread] = useState(0);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [loc.pathname]);
 
   useEffect(() => {
     if (user?.tempPasswordChangeRequired && loc.pathname !== '/profile') {
@@ -52,7 +59,7 @@ export default function Layout() {
   }, [loc.pathname]);
 
   const handleLogout = async () => {
-    const res = await Swal.confirm('Sign out', 'Are you sure you want to sign out of OpsDesk Pro?', 'Yes, Sign out');
+    const res = await Swal.confirm('Sign out', 'Are you sure you want to sign out of your workspace?', 'Yes, Sign out');
     if (res.isConfirmed) {
       logout();
       nav('/auth/login');
@@ -71,7 +78,7 @@ export default function Layout() {
   return (
     <div className="app-shell">
       {/* Sidebar Navigation */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${mobileNavOpen ? 'is-open' : ''}`}>
         <div className="brand">
           <div className="brand-mark tcs-side-mark">O</div>
           <div>
@@ -140,9 +147,20 @@ export default function Layout() {
         </div>
       </aside>
 
+      {mobileNavOpen && <button className="sidebar-backdrop" type="button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
+
       {/* Main Content Area */}
       <main className="main-area">
         <header className="topbar">
+          <button
+            className="icon-btn mobile-menu-btn"
+            type="button"
+            aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen((open) => !open)}
+          >
+            {mobileNavOpen ? <X size={19} /> : <Menu size={19} />}
+          </button>
           <div className="breadcrumb">
             Support Workspace <span>/</span>{' '}
             <strong>

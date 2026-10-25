@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { Activity, AssetHistory, Case, Handover, Task, Ticket, User, WorkReport } from '../models.js';
+import { Activity, Asset, AssetHistory, AssetWorkEvent, Case, Handover, Task, Ticket, User, WorkReport } from '../models.js';
 import { auth, asyncHandler, requirePermission } from '../middleware.js';
 
 const router = Router();
@@ -57,10 +57,10 @@ router.get('/workload', asyncHandler(async (req, res) => {
   if (requestedUserId !== 'all' && !userMap.has(requestedUserId)) {
     return res.status(403).json({ message: 'You cannot view reports for that team member.' });
   }
-  const selectedIds = requestedUserId === 'all' ? allUserIds : [requestedUserId];
+  const selectedIds = requestedUserId === 'all' ? allUserIds : [userMap.get(requestedUserId)._id];
   const selectedIdStrings = new Set(selectedIds.map(String));
 
-  const [tasks, completedTasks, activities, assetHistory, workReports, handovers] = await Promise.all([
+  const [tasks, completedTasks, activities, assetHistory, workReports, handovers, assignedTickets, workloadAssets, assignedEvents] = await Promise.all([
     Task.find({ companyId: req.companyId, assigneeId: { $in: selectedIds } })
       .select('taskNumber title status priority assigneeId assignedBy dueAt completedAt updatedAt')
       .lean(),
@@ -87,8 +87,78 @@ router.get('/workload', asyncHandler(async (req, res) => {
           { targetUserIds: { $in: selectedIds } }
         ] }
       ]
-    }).sort({ createdAt: -1 }).limit(2000).populate('taskId', 'taskNumber title status').lean()
+    }).sort({ createdAt: -1 }).limit(2000).populate('taskId', 'taskNumber title status').lean(),
+    Ticket.find({ companyId: req.companyId, assigneeId: { $in: selectedIds } })
+      .select('ticketNumber item workflowStatus assigneeId')
+      .lean(),
+    selectedIds.length ? Asset.find({
+      companyId: req.companyId,
+      $or: [
+        { assignedToId: { $in: selectedIds } },
+        { currentIssueResolvedById: { $in: selectedIds } },
+        { 'issueHistory.assignedToId': { $in: selectedIds } },
+        { 'issueHistory.resolvedById': { $in: selectedIds } }
+      ]
+    }).select('status isArchived assignedToId eventId issue currentIssueNumber currentIssueResolvedById currentIssueResolvedAt issueHistory createdAt updatedAt').lean() : [],
+    selectedIds.length ? AssetWorkEvent.find({
+      companyId: req.companyId,
+      isArchived: { $ne: true },
+      assignedUserIds: { $in: selectedIds },
+      $or: [{ scheduledAt: createdAt }, { scheduledAt: null, createdAt }]
+    }).select('title scheduledAt createdAt assignedUserIds').sort({ scheduledAt: 1, title: 1 }).lean() : []
   ]);
+
+  const issueCyclesByUser = new Map(selectedIds.map((id) => [String(id), { completed: 0, pending: 0, walkIn: 0 }]));
+  const dateFrom = createdAt.$gte.getTime();
+  const dateTo = createdAt.$lt.getTime();
+  for (const asset of workloadAssets) {
+    const cycles = asset.issueHistory?.length ? asset.issueHistory : [{
+      issueNumber: asset.currentIssueNumber || 1,
+      issue: asset.issue,
+      status: ['READY_FOR_PICKUP', 'RETURNED'].includes(asset.status) ? 'RESOLVED' : asset.status === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'RECEIVED',
+      assignedToId: asset.assignedToId,
+      resolvedById: asset.currentIssueResolvedById,
+      resolvedAt: asset.currentIssueResolvedAt || asset.updatedAt,
+      reportedAt: asset.createdAt
+    }];
+    const currentIssueNumber = Number(asset.currentIssueNumber || cycles[cycles.length - 1]?.issueNumber) || 1;
+    for (const cycle of cycles) {
+      const reportedAt = cycle.reportedAt ? new Date(cycle.reportedAt).getTime() : new Date(asset.createdAt).getTime();
+      const resolvedAt = cycle.resolvedAt ? new Date(cycle.resolvedAt).getTime() : NaN;
+      const isCurrent = Number(cycle.issueNumber) === currentIssueNumber;
+      const isPending = !asset.isArchived && isCurrent && cycle.status !== 'RESOLVED';
+      const wasReportedInRange = reportedAt >= dateFrom && reportedAt < dateTo;
+      const wasResolvedInRange = resolvedAt >= dateFrom && resolvedAt < dateTo;
+      const isWalkIn = !asset.eventId;
+      const assignedToId = cycle.assignedToId || (isCurrent ? asset.assignedToId : null);
+      const assignedId = assignedToId ? String(assignedToId) : '';
+      if (assignedId && issueCyclesByUser.has(assignedId)) {
+        const counts = issueCyclesByUser.get(assignedId);
+        if (isPending) counts.pending += 1;
+        if (isWalkIn && (isPending || wasReportedInRange || (cycle.status === 'RESOLVED' && wasResolvedInRange))) counts.walkIn += 1;
+      }
+      const resolvedById = cycle.resolvedById || (isCurrent ? asset.currentIssueResolvedById : null);
+      const resolverId = resolvedById ? String(resolvedById) : '';
+      if (cycle.status === 'RESOLVED' && resolverId && issueCyclesByUser.has(resolverId)) {
+        issueCyclesByUser.get(resolverId).completed += 1;
+      }
+    }
+  }
+  const ticketsByUser = new Map(selectedIds.map((id) => [String(id), { resolved: 0, pending: 0, total: 0 }]));
+  for (const ticket of assignedTickets) {
+    const counts = ticketsByUser.get(String(ticket.assigneeId));
+    if (!counts) continue;
+    counts.total += 1;
+    if (ticket.workflowStatus === 'RESOLVED') counts.resolved += 1;
+    else counts.pending += 1;
+  }
+  const eventsByUser = new Map(selectedIds.map((id) => [String(id), []]));
+  for (const event of assignedEvents) {
+    for (const assigneeId of event.assignedUserIds || []) {
+      const assignedTo = eventsByUser.get(String(assigneeId));
+      if (assignedTo) assignedTo.push({ _id: event._id, title: event.title, scheduledAt: event.scheduledAt || event.createdAt });
+    }
+  }
 
   const taskIds = [...new Set(activities.filter((row) => row.entityType === 'TASK').map((row) => String(row.entityId)))];
   const ticketIds = [...new Set(activities.filter((row) => row.entityType === 'TICKET').map((row) => String(row.entityId)))];
@@ -148,7 +218,9 @@ router.get('/workload', asyncHandler(async (req, res) => {
       source: 'ASSET',
       title: row.action === 'REPEAT_ISSUE' ? 'Repeat issue reported' : row.action === 'REPEAT_ISSUE_RESOLVED' ? 'Repeat issue resolved' : actionLabel(row.action),
       subject: row.assetId?.assetId ? `${row.assetId.assetId}${row.assetId.issue ? ` · ${row.assetId.issue}` : ''}` : 'Asset update',
-      status: row.changes?.status?.to ? actionLabel(row.changes.status.to) : row.assetId?.status || '',
+      status: ['READY_FOR_PICKUP', 'RETURNED'].includes(row.changes?.status?.to)
+        ? 'RESOLVED'
+        : row.changes?.status?.to ? actionLabel(row.changes.status.to) : row.assetId?.status || '',
       note: row.comment || '',
       repeatIssue: isRepeatIssue,
       repeatIssueText: repeatIssue.issue || row.changes?.issue?.to || row.assetId?.lastCompletedIssue || row.assetId?.issue || '',
@@ -207,6 +279,8 @@ router.get('/workload', asyncHandler(async (req, res) => {
     const assignedTasks = tasks.filter((task) => String(task.assigneeId) === id);
     const incompleteTasks = assignedTasks.filter((task) => task.status !== 'COMPLETED');
     const completedCount = completedTasks.filter((task) => String(task.assigneeId) === id).length;
+    const assetCounts = issueCyclesByUser.get(id) || { completed: 0, pending: 0, walkIn: 0 };
+    const ticketCounts = ticketsByUser.get(id) || { resolved: 0, pending: 0, total: 0 };
     const userHandovers = handovers.filter((handover) =>
       String(handover.initiatedBy) === id || String(handover.fromUserId) === id ||
       String(handover.acceptedBy) === id || (handover.targetUserIds || []).some((target) => String(target) === id)
@@ -227,6 +301,14 @@ router.get('/workload', asyncHandler(async (req, res) => {
       assignedTaskCount: assignedTasks.length,
       incompleteTaskCount: incompleteTasks.length,
       completedTaskCount: completedCount,
+      assetIssuesCompleted: assetCounts.completed,
+      assetIssuesPending: assetCounts.pending,
+      ticketCount: ticketCounts.total,
+      ticketResolvedCount: ticketCounts.resolved,
+      ticketPendingCount: ticketCounts.pending,
+      walkInIssueCount: assetCounts.walkIn,
+      assignedEvents: eventsByUser.get(id) || [],
+      eventCount: (eventsByUser.get(id) || []).length,
       handoverCount: userHandovers.length,
       workCount: timeline.length,
       assignedTasks: assignedTasks.map(toTaskSummary),

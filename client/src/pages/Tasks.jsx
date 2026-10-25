@@ -16,6 +16,7 @@ import {
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Modal from '../components/Modal.jsx';
+import LoadingState from '../components/LoadingState.jsx';
 import Swal from '../utils/swal.js';
 import { useSearchParams } from 'react-router-dom';
 
@@ -69,9 +70,11 @@ export default function Tasks() {
 
   // States
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const load = () => {
+  const load = ({ silent = false } = {}) => {
+    if (!silent && !items.length) setLoading(true);
     api.get('/tasks', {
       params: {
         search,
@@ -81,15 +84,23 @@ export default function Tasks() {
       }
     })
       .then((r) => setItems(r.data))
-      .catch((e) => setError(e.response?.data?.message || 'Unable to load tasks.'));
+      .catch((e) => setError(e.response?.data?.message || 'Unable to load tasks.'))
+      .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     load();
+    const refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load({ silent: true });
+    }, 15000);
+    return () => window.clearInterval(refreshInterval);
+  }, [search, statusFilter, mineOnly, unassignedOnly]);
+
+  useEffect(() => {
     api.get('/team')
       .then((r) => setMembers(r.data.filter((u) => u.status === 'active')))
       .catch(() => {});
-  }, [search, statusFilter, mineOnly, unassignedOnly]);
+  }, []);
 
   useEffect(() => {
     setUnassignedOnly(searchParams.get('unassigned') === 'true');
@@ -152,15 +163,27 @@ export default function Tasks() {
 
     setBusy(true);
     try {
-      await api.post(`/tasks/${reassignTask._id}/assign`, {
+      const { data } = await api.post(`/tasks/${reassignTask._id}/assign`, {
         assigneeId: reassignUserId,
         description: reassignNote
       });
+      const recipient = members.find((member) => String(member._id) === String(reassignUserId));
+      setItems((current) => current.flatMap((item) => {
+        if (item._id !== reassignTask._id) return [item];
+        const updated = {
+          ...item,
+          ...data,
+          assigneeId: String(data.assigneeId),
+          assignee: recipient || item.assignee,
+          assigner: user
+        };
+        if (unassignedOnly || (statusFilter !== 'ALL' && updated.status !== statusFilter) || (mineOnly && String(updated.assigneeId) !== currentUserId)) return [];
+        return [updated];
+      }));
       Swal.success('Task Reassigned', 'Task has been directly reassigned to the selected team member.');
       setReassignTask(null);
       setReassignUserId('');
       setReassignNote('');
-      load();
     } catch (err) {
       Swal.error('Reassignment Failed', err.response?.data?.message || 'Unable to reassign task.');
     } finally {
@@ -304,6 +327,7 @@ export default function Tasks() {
           </div>
         </div>
 
+        {loading && !items.length && <LoadingState title="Loading tasks" detail="Refreshing task assignments and status." />}
         <div className="table-scroll">
           <table>
             <thead>
@@ -468,7 +492,7 @@ export default function Tasks() {
           </table>
         </div>
 
-        {!items.length && (
+        {!loading && !items.length && (
           <div className="empty-state compact">
             <div className="empty-icon">
               <ClipboardList size={22} />

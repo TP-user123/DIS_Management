@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { Ticket, User, Notification, Activity } from '../models.js';
 import { auth, asyncHandler, requirePermission } from '../middleware.js';
 import { canAssign, ensureCompanyUser, logActivity } from '../utils.js';
+ import { normalizeWorkflowStatus, ticketAgeDays } from '../ticketRules.js';
 
 const router = Router();
 router.use(auth, requirePermission('tickets:view'));
@@ -9,7 +10,7 @@ router.use(auth, requirePermission('tickets:view'));
 const statusNorm = s => String(s || 'Open').trim();
 const priorityNorm = s => String(s || 'Medium').trim();
 const WORKFLOW_STATUSES = ['OPEN', 'WIP', 'RESOLVED', 'REOPENED', 'ROUTED'];
-const isResolved = s => s === 'RESOLVED';
+const isResolved = s => normalizeWorkflowStatus(s) === 'RESOLVED';
 
 router.get('/', asyncHandler(async (req, res) => {
   const f = { companyId: req.companyId };
@@ -37,15 +38,15 @@ router.get('/', asyncHandler(async (req, res) => {
   const ids = [...new Set(rows.flatMap(t => [t.assigneeId, t.assignedBy]).filter(Boolean).map(String))];
   const users = await User.find({ _id: { $in: ids }, companyId: req.companyId }).select('name role team shift').lean();
   const um = Object.fromEntries(users.map(u => [String(u._id), u]));
-  const now = Date.now();
+  const now = new Date();
 
   res.json(rows.map(t => ({
     ...t,
-    workflowStatus: t.workflowStatus || 'OPEN',
+    workflowStatus: normalizeWorkflowStatus(t.workflowStatus || t.sourceStatus),
     assignee: um[String(t.assigneeId)] || null,
     assigner: um[String(t.assignedBy)] || null,
-    ageDays: Math.max(0, Math.floor((now - new Date(t.loggedDate).getTime()) / 86400000)),
-    isClosed: isResolved(t.workflowStatus || 'OPEN')
+    ageDays: ticketAgeDays(t, now),
+    isClosed: isResolved(t.workflowStatus || t.sourceStatus)
   })));
 }));
 
@@ -379,12 +380,17 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
 
   const description = String(req.body.description || req.body.remarks || '').trim();
 
+  const statusAt = new Date();
   ticket.workflowStatus = next;
   ticket.statusUpdatedBy = req.user._id;
-  ticket.statusUpdatedAt = new Date();
+  ticket.statusUpdatedAt = statusAt;
   if (next === 'RESOLVED') {
     ticket.resolvedBy = req.user._id;
-    ticket.resolvedAt = new Date();
+    ticket.resolvedAt = statusAt;
+  } else if (next === 'REOPENED') {
+    ticket.reopenedAt = statusAt;
+    ticket.ageStartedAt = statusAt;
+    ticket.resolvedAt = null;
   }
   if (description) {
     ticket.remarks = description;
@@ -479,18 +485,35 @@ router.get('/summary', asyncHandler(async (req, res) => {
   const filter = { companyId: req.companyId };
   if (req.user.role === 'RE') filter.assigneeId = req.user._id;
 
-  const all = await Ticket.find(filter).select('workflowStatus sourceStatus priorityName loggedDate assigneeId').lean();
-  const status = t => WORKFLOW_STATUSES.includes(t.workflowStatus) ? t.workflowStatus : 'OPEN';
+  const all = await Ticket.find(filter).select('ticketNumber item description workflowStatus sourceStatus priorityName loggedDate ageStartedAt reopenedAt resolvedAt statusUpdatedAt assigneeId').lean();
+  const status = t => normalizeWorkflowStatus(t.workflowStatus || t.sourceStatus);
   const open = all.filter(t => !isResolved(status(t)));
-  const age = t => Math.max(0, Math.floor((Date.now() - new Date(t.loggedDate).getTime()) / 86400000));
+  const now = new Date();
+  const age = t => ticketAgeDays(t, now);
+  const agingRows = open.filter(t => age(t) > 1).sort((a, b) => age(b) - age(a));
+  const assigneeIds = [...new Set(agingRows.map(t => String(t.assigneeId || '')).filter(Boolean))];
+  const assignees = assigneeIds.length
+    ? await User.find({ _id: { $in: assigneeIds }, companyId: req.companyId }).select('_id name role').lean()
+    : [];
+  const assigneeById = new Map(assignees.map(person => [String(person._id), person]));
 
   res.json({
     total: all.length,
     open: open.length,
     closed: all.length - open.length,
     unassigned: all.filter(t => !t.assigneeId && !isResolved(status(t))).length,
-    aging: open.filter(t => age(t) > 0).length,
+    aging: agingRows.length,
     oldestAge: open.length ? Math.max(...open.map(age)) : 0,
+    agingTickets: agingRows.slice(0, 10).map(t => ({
+      _id: t._id,
+      ticketNumber: t.ticketNumber,
+      item: t.item,
+      description: t.description,
+      priorityName: t.priorityName,
+      workflowStatus: status(t),
+      ageDays: age(t),
+      assignee: assigneeById.get(String(t.assigneeId || '')) || null
+    })),
     critical: open.filter(t => /critical|urgent/i.test(t.priorityName)).length,
     high: open.filter(t => /high/i.test(t.priorityName)).length,
     statusBreakdown: ['OPEN', 'WIP', 'RESOLVED', 'REOPENED'].map(s => ({

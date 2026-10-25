@@ -68,7 +68,6 @@ const normalizeExcelDate = (v) => {
   return Number.isNaN(d.getTime()) ? v : d.toISOString();
 };
 
-const dayCount = (d) => Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 86400000));
 const isResolved = (s) => s === 'RESOLVED';
 
 export default function Tickets() {
@@ -213,7 +212,7 @@ const endItem = Math.min(
     total: items.length,
     open: items.filter((t) => !isResolved(t.workflowStatus || 'OPEN')).length,
     closed: items.filter((t) => isResolved(t.workflowStatus || 'OPEN')).length,
-    aging: items.filter((t) => !isResolved(t.workflowStatus || 'OPEN') && dayCount(t.loggedDate) > 0).length
+    aging: items.filter((t) => !isResolved(t.workflowStatus || 'OPEN') && Number(t.ageDays) > 1).length
   }), [items]);
 
   // Selection Toggle Handlers - Exclude resolved tickets to prevent credit theft
@@ -833,7 +832,7 @@ const endItem = Math.min(
 
                     <td>
                       <span className={t.ageDays > 0 && !isTicketResolved ? 'aging-number' : ''}>
-                        {t.ageDays} day{t.ageDays === 1 ? '' : 's'}
+                        {isTicketResolved ? `Closed · ${t.ageDays} day${t.ageDays === 1 ? '' : 's'}` : `${t.ageDays} day${t.ageDays === 1 ? '' : 's'}`}
                       </span>
                     </td>
 
@@ -981,7 +980,7 @@ const endItem = Math.min(
               <div>
                 <small style={{ color: '#64748b', fontSize: '10px' }}>Age</small>
                 <div style={{ fontWeight: '700', fontSize: '13px' }}>
-                  {detailTicket.ageDays} day(s)
+                  {isResolved(detailTicket.workflowStatus || 'OPEN') ? `Closed · ${detailTicket.ageDays} day${detailTicket.ageDays === 1 ? '' : 's'}` : `${detailTicket.ageDays} day${detailTicket.ageDays === 1 ? '' : 's'}`}
                 </div>
               </div>
             </div>

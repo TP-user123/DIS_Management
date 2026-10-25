@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { ArrowRight, ShieldCheck, Activity, Layers3, LockKeyhole } from 'lucide-react';
+import { ArrowRight, ShieldCheck, Activity, Layers3, LockKeyhole, Eye, EyeOff } from 'lucide-react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -8,6 +8,7 @@ export default function AuthPage() {
   const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const { acceptSession } = useAuth();
   const navigate = useNavigate();
 
@@ -17,7 +18,7 @@ export default function AuthPage() {
     setBusy(true);
 
     try {
-      const { data } = await api.post('/auth/login', form);
+      const { data } = await api.post('/auth/login', { ...form, email: form.email.trim() });
       acceptSession(data);
       navigate(data.user.tempPasswordChangeRequired ? '/profile' : '/');
     } catch (err) {
@@ -41,30 +42,29 @@ export default function AuthPage() {
 
         <div className="hero-copy">
           <div className="live-eyebrow">
-            <i /> IT SERVICE ORCHESTRATION PLATFORM
+            <i /> DIS SERVICE OPERATIONS
           </div>
           <h1>
-            Every ticket.<br />
-            <em>Every task.</em><br />
-            Under control.
+            A clearer view<br />
+            of every <em>issue.</em>
           </h1>
           <p>
-            An integrated workspace for ticket assignment, operational execution, shift handovers, and private engineer escalation.
+            Keep asset issues, ticket assignments, engineer handovers, and daily operations together in one secure workspace.
           </p>
 
           <div className="hero-feature">
             <span><Layers3 size={17} /></span>
             <div>
-              <b>Ticket Operations & Queue Health</b>
-              <small>Sectioned queues, smart distribution, and audit logging</small>
+              <b>Asset and ticket tracking</b>
+              <small>Follow assignments, issue history, and resolution progress</small>
             </div>
           </div>
 
           <div className="hero-feature">
             <span><Activity size={17} /></span>
             <div>
-              <b>Operational Continuity</b>
-              <small>Lead reassignment, multi-party broadcast handovers, and team events</small>
+              <b>Clear team handovers</b>
+              <small>Keep work moving between shifts and engineers</small>
             </div>
           </div>
 
@@ -103,10 +103,10 @@ export default function AuthPage() {
             <LockKeyhole size={21} />
           </div>
 
-          <div className="form-overline">SECURE ENTERPRISE PORTAL</div>
-          <h2>Sign in to OpsDesk Pro</h2>
+          <div className="form-overline">SECURE WORKSPACE</div>
+          <h2>Welcome back</h2>
           <p className="auth-description">
-            Access your operations queue with your organizational account credentials.
+            Sign in with your work account to continue to your team’s workspace.
           </p>
 
           <form className="form-stack" onSubmit={submit}>
@@ -115,6 +115,8 @@ export default function AuthPage() {
               <input
                 type="email"
                 autoComplete="username"
+                autoCapitalize="none"
+                spellCheck="false"
                 placeholder="engineer@company.com"
                 value={form.email}
                 onChange={(e) => setForm({ ...form, email: e.target.value })}
@@ -124,21 +126,33 @@ export default function AuthPage() {
 
             <label>
               Password
-              <input
-                type="password"
-                autoComplete="current-password"
-                placeholder="Enter your secure password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                required
-              />
+              <span className="auth-password-field">
+                <input
+                  className="auth-password-input"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  required
+                />
+                <button
+                  className="auth-password-toggle"
+                  type="button"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((visible) => !visible)}
+                >
+                  {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
+              </span>
             </label>
 
             <div className="forgot-link-row">
               <Link to="/auth/forgot-password">Forgot password?</Link>
             </div>
 
-            {error && <div className="error-box">{error}</div>}
+            {error && <div className="error-box" role="alert">{error}</div>}
 
             <button className="btn btn-primary btn-full login-submit" disabled={busy}>
               {busy ? (
@@ -154,7 +168,7 @@ export default function AuthPage() {
           </form>
 
           <div className="auth-security">
-            <ShieldCheck size={15} /> Authenticated session with fine-grained access policies.
+            <ShieldCheck size={15} /> Your access follows your team role and permissions.
           </div>
 
           <div className="auth-copyright">

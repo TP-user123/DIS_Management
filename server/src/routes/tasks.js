@@ -60,7 +60,7 @@ router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res
     dueAt: dueAt || null
   });
 
-  await logActivity({
+  const activityWrite = logActivity({
     companyId: req.companyId,
     entityType: 'TASK',
     entityId: task._id,
@@ -69,8 +69,9 @@ router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res
     details: { assigneeId: target ? target._id : null }
   });
 
+  const writes = [activityWrite];
   if (target) {
-    await Notification.create({
+    writes.push(Notification.create({
       companyId: req.companyId,
       userId: target._id,
       type: 'TASK',
@@ -78,8 +79,9 @@ router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res
       message: `${task.taskNumber}: ${task.title}`,
       link: '/tasks',
       dedupeKey: `task-assigned-${task._id}`
-    });
+    }));
   }
+  await Promise.all(writes);
 
   res.status(201).json(task);
 }));
@@ -165,7 +167,7 @@ router.post('/:id/assign', asyncHandler(async (req, res) => {
   await task.save();
 
   const note = req.body.description || req.body.notes || '';
-  await logActivity({
+  const activityWrite = logActivity({
     companyId: req.companyId,
     entityType: 'TASK',
     entityId: task._id,
@@ -180,7 +182,7 @@ router.post('/:id/assign', asyncHandler(async (req, res) => {
     }
   });
 
-  await Notification.create({
+  const notificationWrite = Notification.create({
     companyId: req.companyId,
     userId: target._id,
     type: 'TASK',
@@ -189,6 +191,7 @@ router.post('/:id/assign', asyncHandler(async (req, res) => {
     link: '/tasks',
     dedupeKey: `task-assigned-${task._id}-${Date.now()}`
   });
+  await Promise.all([activityWrite, notificationWrite]);
 
   res.json(task);
 }));
@@ -279,7 +282,7 @@ router.post('/:id/handovers', requirePermission('tasks:handover'), asyncHandler(
 router.get('/handovers/inbox', asyncHandler(async (req, res) => {
   const isLead = ['MANAGER', 'TL', 'SL'].includes(req.user.role);
 
-  let query = { companyId: req.companyId };
+  let query = { companyId: req.companyId, taskId: { $ne: null } };
   if (!isLead) {
     query.$or = [
       { toUserId: req.user._id },
@@ -323,7 +326,7 @@ router.get('/handovers/inbox', asyncHandler(async (req, res) => {
 
 // PATCH /api/tasks/handovers/:id - Accept/reject handover; acceptance reassigns task and shows worker
 router.patch('/handovers/:id', requirePermission('tasks:handover'), asyncHandler(async (req, res) => {
-  const h = await Handover.findOne({ _id: req.params.id, companyId: req.companyId });
+  const h = await Handover.findOne({ _id: req.params.id, companyId: req.companyId, taskId: { $ne: null } });
   if (!h) return res.status(404).json({ message: 'Handover request not found.' });
 
   const isCandidate = (h.targetUserIds || []).map(String).includes(String(req.user._id)) || String(h.toUserId) === String(req.user._id);
