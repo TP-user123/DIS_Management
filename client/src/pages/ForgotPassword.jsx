@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, Mail, ShieldCheck } from 'lucide-react';
 import api from '../api.js';
+import ThemeToggle from '../components/ThemeToggle.jsx';
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState('');
@@ -54,6 +55,7 @@ export default function ForgotPassword() {
       </section>
 
       <section className="tcs-auth-form-wrap">
+        <ThemeToggle className="theme-toggle-auth" />
         <div className="tcs-auth-form">
           <div className="auth-lock">
             <Mail size={21} />

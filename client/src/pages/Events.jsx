@@ -1,20 +1,11 @@
 import { useEffect, useState } from 'react';
-import {
-  CalendarDays,
-  Plus,
-  MapPin,
-  Users,
-  Edit2,
-  Trash2,
-  Clock,
-  Check,
-  ShieldCheck,
-  UserCheck
-} from 'lucide-react';
+import { Plus } from 'lucide-react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Modal from '../components/Modal.jsx';
 import Swal from '../utils/swal.js';
+import IndiaEventsCalendar from '../components/IndiaEventsCalendar.jsx';
+import './events-calendar.css';
 
 const emptyEventForm = {
   title: '',
@@ -41,12 +32,21 @@ export default function Events() {
   const [editingEventId, setEditingEventId] = useState(null); // null for create, ID for edit
   const [form, setForm] = useState(emptyEventForm);
   const [busy, setBusy] = useState(false);
+  const [eventsLoading, setEventsLoading] = useState(true);
+  const [eventActionKey, setEventActionKey] = useState('');
   const [error, setError] = useState('');
 
-  const load = () => {
-    api.get('/events')
-      .then((r) => setEvents(r.data))
-      .catch((e) => setError(e.response?.data?.message || 'Could not load events.'));
+  const load = async () => {
+    setEventsLoading(true);
+    try {
+      const { data } = await api.get('/events');
+      setEvents(data);
+      setError('');
+    } catch (e) {
+      setError(e.response?.data?.message || 'Could not load events.');
+    } finally {
+      setEventsLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -130,6 +130,38 @@ export default function Events() {
     }
   };
 
+  const handleOccurrenceAction = async (event, dateKey, action, postponedTo) => {
+    if (action !== 'POSTPONE') {
+      const isDone = action === 'DONE';
+      const confirmation = await Swal.confirm(
+        isDone ? 'Mark Event Date Done' : 'Cancel Event Date',
+        `${isDone ? 'Mark' : 'Cancel'} ${new Date(`${dateKey}T00:00:00`).toLocaleDateString()} for “${event.title}”?`,
+        isDone ? 'Mark Done' : 'Cancel Date'
+      );
+      if (!confirmation.isConfirmed) return false;
+    }
+
+    setEventActionKey(`${event._id}:${dateKey}`);
+    try {
+      await api.patch(`/events/${event._id}/occurrences/${dateKey}`, {
+        action,
+        ...(action === 'POSTPONE' ? { postponedTo } : {})
+      });
+      const title = action === 'DONE' ? 'Event Date Completed' : action === 'CANCEL' ? 'Event Date Cancelled' : 'Event Date Postponed';
+      const message = action === 'POSTPONE'
+        ? `${event.title} was moved to ${new Date(`${postponedTo}T00:00:00`).toLocaleDateString()}.`
+        : `${event.title} on ${new Date(`${dateKey}T00:00:00`).toLocaleDateString()} was ${action === 'DONE' ? 'marked done' : 'cancelled'}.`;
+      Swal.success(title, message);
+      await load();
+      return true;
+    } catch (err) {
+      Swal.error('Event Update Failed', err.response?.data?.message || 'Unable to update this event date.');
+      return false;
+    } finally {
+      setEventActionKey('');
+    }
+  };
+
   // Toggle user assignment (supports RE, Manager, SL, TL)
   const toggleUserAssignment = (userId) => {
     setForm((f) => {
@@ -180,114 +212,17 @@ export default function Events() {
 
       {error && <div className="error-box">{error}</div>}
 
-      {/* Events Grid */}
-      <div className="events-grid">
-        {events.map((ev) => {
-          const isCreator = String(ev.createdBy || ev.creator?._id) === currentUserId;
-          const canEditThis = canManage || isCreator;
-          const attendees = ev.assignees || [];
-
-          return (
-            <article className="event-card" key={ev._id}>
-              <div className="event-card-top">
-                <div className="event-date-large">
-                  <strong>{new Date(ev.startsAt).getDate()}</strong>
-                  <span>
-                    {new Date(ev.startsAt)
-                      .toLocaleDateString(undefined, { month: 'short' })
-                      .toUpperCase()}
-                  </span>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span
-                    className={`status-pill ${
-                      ev.audience === 'USER' ? 'status-open' : 'status-completed'
-                    }`}
-                  >
-                    {ev.audience === 'USER' ? 'Multi-Member Event' : 'Entire Team'}
-                  </span>
-
-                  {/* Edit and Delete Actions (Requirement 7) */}
-                  {canEditThis && (
-                    <div style={{ display: 'flex', gap: '4px' }}>
-                      <button
-                        className="icon-btn"
-                        title="Update / Edit Event"
-                        onClick={() => openEditModal(ev)}
-                      >
-                        <Edit2 size={14} style={{ color: '#0077b8' }} />
-                      </button>
-                      <button
-                        className="icon-btn"
-                        title="Delete / Cancel Event"
-                        onClick={() => handleDeleteEvent(ev)}
-                      >
-                        <Trash2 size={14} style={{ color: '#dc2626' }} />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <h3>{ev.title}</h3>
-              <p>{ev.description || 'No additional description provided.'}</p>
-
-              <div className="event-card-meta">
-                <span>
-                  <Clock size={15} />
-                  {new Date(ev.startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  {ev.endsAt &&
-                    ` – ${new Date(ev.endsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
-                </span>
-
-                {ev.location && (
-                  <span>
-                    <MapPin size={15} /> {ev.location}
-                  </span>
-                )}
-
-                {/* Assigned Multi-Role Attendees Display */}
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#475569', marginBottom: '6px' }}>
-                    <Users size={14} style={{ color: '#0077b8' }} />
-                    <strong>Assigned Attendees ({ev.audience === 'USER' ? attendees.length : 'All ' + (ev.team || 'Team')}):</strong>
-                  </div>
-
-                  {ev.audience === 'USER' ? (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                      {attendees.map((u) => (
-                        <span
-                          key={u._id || u.id}
-                          className={`badge badge-${u.role?.toLowerCase() || 're'}`}
-                          style={{ fontSize: '10px' }}
-                        >
-                          {u.name} ({u.role})
-                        </span>
-                      ))}
-                      {!attendees.length && <small style={{ color: '#94a3b8' }}>None assigned</small>}
-                    </div>
-                  ) : (
-                    <span style={{ fontSize: '11px', color: '#64748b' }}>
-                      Entire {ev.team || 'IT Support'} Team
-                    </span>
-                  )}
-                </div>
-              </div>
-            </article>
-          );
-        })}
-
-        {!events.length && (
-          <div className="panel empty-state">
-            <div className="empty-icon">
-              <CalendarDays size={22} />
-            </div>
-            <strong>No events scheduled</strong>
-            <p>Create an operational event and assign RE, SL, TL, or Managers to collaborate.</p>
-          </div>
-        )}
-      </div>
+      <IndiaEventsCalendar
+        events={events}
+        eventsLoading={eventsLoading}
+        user={user}
+        userId={currentUserId}
+        eventActionKey={eventActionKey}
+        onOccurrenceAction={handleOccurrenceAction}
+        canManage={canManage}
+        onEdit={openEditModal}
+        onDelete={handleDeleteEvent}
+      />
 
       {/* Create / Edit Modal (Requirement 7) */}
       {showModal && (
@@ -362,11 +297,11 @@ export default function Events() {
             {/* Multi-Role User Assignment Picker (Requirement 7) */}
             {form.audience === 'USER' ? (
               <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <span className="field-label" style={{ margin: 0 }}>
+                <div className="event-attendee-heading">
+                  <span className="field-label">
                     Assign Attendees across all roles ({form.assignedUserIds.length} selected):
                   </span>
-                  <div style={{ display: 'flex', gap: '4px' }}>
+                  <div className="event-attendee-actions">
                     {['RE', 'SL', 'TL', 'MANAGER'].map((role) => (
                       <button
                         key={role}
@@ -381,18 +316,7 @@ export default function Events() {
                   </div>
                 </div>
 
-                <div
-                  style={{
-                    maxHeight: '190px',
-                    overflowY: 'auto',
-                    border: '1px solid #e2e8f0',
-                    borderRadius: '8px',
-                    padding: '8px',
-                    display: 'grid',
-                    gap: '6px',
-                    background: '#ffffff'
-                  }}
-                >
+                <div className="event-attendee-list">
                   {members.map((m) => {
                     const id = m._id || m.id;
                     const isChecked = form.assignedUserIds.includes(id);
@@ -400,24 +324,16 @@ export default function Events() {
                     return (
                       <label
                         key={id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '10px',
-                          cursor: 'pointer',
-                          padding: '6px 8px',
-                          borderRadius: '6px',
-                          background: isChecked ? '#eff6ff' : 'transparent',
-                          transition: 'background 0.12s ease'
-                        }}
+                        className={`event-attendee-option${isChecked ? ' is-selected' : ''}`}
                       >
                         <input
+                          className="event-attendee-checkbox"
                           type="checkbox"
                           checked={isChecked}
                           onChange={() => toggleUserAssignment(id)}
                         />
-                        <div style={{ flex: 1, minWidth: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '12px', fontWeight: '600', color: '#1e293b' }}>
+                        <div className="event-attendee-option-main">
+                          <span className="event-attendee-name">
                             {m.name}
                           </span>
                           <span className={`badge badge-${m.role?.toLowerCase() || 're'}`}>

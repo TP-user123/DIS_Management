@@ -36,12 +36,19 @@ function csvCell(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
+const eventStatusLabel = (status) => ({ DONE: 'Done', CANCELLED: 'Cancelled', POSTPONED: 'Postponed', PENDING: 'Pending', SCHEDULED: 'Scheduled' }[status] || 'Pending');
+const eventStatusTone = (status) => status === 'DONE' ? 'done' : status === 'CANCELLED' ? 'cancelled' : status === 'POSTPONED' ? 'postponed' : status === 'SCHEDULED' ? 'scheduled' : 'pending';
+const eventDateLabel = (event) => event.dateKey
+  ? new Date(`${event.dateKey}T00:00:00`).toLocaleDateString()
+  : event.scheduledAt ? new Date(event.scheduledAt).toLocaleDateString() : 'Date unavailable';
+const eventReportLabel = (event) => `${event.title} (${eventDateLabel(event)}) · ${eventStatusLabel(event.status)}`;
+
 function exportReport(report, selectedUserId, period) {
   const userRows = report.users.map((member) => [
     member.name, member.role, member.team, member.shift,
     member.assetIssuesCompleted, member.assetIssuesPending,
     member.ticketResolvedCount, member.ticketPendingCount, member.walkInIssueCount,
-    (member.assignedEvents || []).map((event) => event.title).join('; ')
+    (member.assignedEvents || []).map(eventReportLabel).join('; ')
   ]);
   const rows = [
     ['User', 'Role', 'Team', 'Shift', 'Asset issues resolved total', 'Asset issues pending', 'Tickets resolved', 'Tickets pending', 'Walk-in issues in range', 'Assigned events in range'],
@@ -89,6 +96,8 @@ export default function Reports() {
         params: {
           from: localDateStart(fromDate),
           to: localDateStart(nextDate(toDate)),
+          dateFrom: fromDate,
+          dateTo: nextDate(toDate),
           userId: reportUserId || 'all'
         }
       });
@@ -113,6 +122,11 @@ export default function Reports() {
     () => members.find((member) => String(member._id) === String(selectedUserId)) || null,
     [members, selectedUserId]
   );
+  const eventStatusCounts = useMemo(() => (selectedMember?.assignedEvents || []).reduce((counts, event) => {
+    if (event.status === 'DONE') counts.done += 1;
+    else if (event.status === 'PENDING') counts.pending += 1;
+    return counts;
+  }, { pending: 0, done: 0 }), [selectedMember]);
   const workEntryGroups = useMemo(() => {
     const groups = new Map();
     const labels = {
@@ -121,7 +135,7 @@ export default function Reports() {
       CASE: 'Case activity',
       HANDOVER: 'Handover activity',
       'WORK NOTE': 'Work notes',
-      EVENT: 'Other event activity',
+      EVENT: 'Event updates',
       ACTIVITY: 'Other activity'
     };
     for (const entry of selectedMember?.timeline || []) {
@@ -230,7 +244,7 @@ export default function Reports() {
               <td><span className="work-count-good">Completed {member.assetIssuesCompleted}</span><small className={member.assetIssuesPending ? 'work-number-warn work-table-sub' : 'work-table-sub'}>Pending {member.assetIssuesPending}</small></td>
               <td><span className="work-count-good">Resolved {member.ticketResolvedCount}</span><small className={member.ticketPendingCount ? 'work-number-warn work-table-sub' : 'work-table-sub'}>Pending {member.ticketPendingCount} of {member.ticketCount}</small></td>
               <td>{member.walkInIssueCount}</td>
-              <td><span>{member.eventCount}</span>{member.assignedEvents?.length > 0 && <small className="work-table-sub">{member.assignedEvents.map((event) => event.title).join(', ')}</small>}</td>
+              <td><span>{member.eventCount}</span>{member.assignedEvents?.length > 0 && <small className="work-table-sub">{member.assignedEvents.slice(0, 2).map(eventReportLabel).join(', ')}{member.assignedEvents.length > 2 ? ` +${member.assignedEvents.length - 2} more` : ''}</small>}</td>
             </tr>)}</tbody>
           </table></div> : <div className="empty-state compact"><Users size={22} /><strong>No visible team members</strong><p>No activity is available for the selected scope.</p></div>}
         </section>}
@@ -248,7 +262,7 @@ export default function Reports() {
               <article className="metric-card workload-card"><div className="metric-top">Asset issues <span className="metric-icon green"><CheckCircle2 size={17} /></span></div><div className="workload-count-pair"><span><strong>{selectedMember.assetIssuesCompleted}</strong><small>Completed total</small></span><span><strong>{selectedMember.assetIssuesPending}</strong><small>Pending now</small></span></div></article>
               <article className="metric-card workload-card"><div className="metric-top">Tickets <span className="metric-icon blue"><ClipboardList size={17} /></span></div><div className="workload-count-pair"><span><strong>{selectedMember.ticketResolvedCount}</strong><small>Resolved</small></span><span><strong>{selectedMember.ticketPendingCount}</strong><small>Pending</small></span></div><div className="metric-note">{selectedMember.ticketCount} currently assigned</div></article>
               <article className="metric-card workload-card"><div className="metric-top">Walk-in issues <span className="metric-icon orange"><Laptop size={17} /></span></div><div className="metric-value">{selectedMember.walkInIssueCount}</div><div className="metric-note">Active walk-ins plus issues handled in this period</div></article>
-              <article className="metric-card workload-card"><div className="metric-top">Assigned events <span className="metric-icon purple"><CalendarDays size={17} /></span></div><div className="metric-value">{selectedMember.eventCount}</div><div className="work-event-titles">{selectedMember.assignedEvents?.length ? selectedMember.assignedEvents.map((event) => <span key={event._id}>{event.title}</span>) : <span>No events assigned in this period</span>}</div></article>
+              <article className="metric-card workload-card"><div className="metric-top">Assigned events <span className="metric-icon purple"><CalendarDays size={17} /></span></div><div className="metric-value">{selectedMember.eventCount}</div><div className="workload-count-pair"><span><strong>{eventStatusCounts.done}</strong><small>Done</small></span><span><strong>{eventStatusCounts.pending}</strong><small>Pending</small></span></div><div className="work-event-titles">{selectedMember.assignedEvents?.length ? selectedMember.assignedEvents.map((event) => <span className="work-event-chip" key={event._id}><strong>{event.title}</strong><small>{eventDateLabel(event)}</small><b className={`work-event-status is-${eventStatusTone(event.status)}`}>{eventStatusLabel(event.status)}</b></span>) : <span>No events assigned in this period</span>}</div></article>
             </div>
           </section>
 
@@ -283,7 +297,7 @@ export default function Reports() {
           </div>
 
           <section id="work-entries-detail" className="panel work-timeline-panel work-drilldown-panel">
-            <div className="panel-heading"><div><h2>Daily activity</h2><p>Work is grouped by bulk event, walk-in intake, task, ticket and other activity. Expand a group to see its entries.</p></div><span className="count-pill">{selectedMember.timeline.length} entries in {workEntryGroups.length} groups</span></div>
+            <div className="panel-heading"><div><h2>Daily activity</h2><p>Work is grouped by calendar events, bulk events, walk-in intake, tasks, tickets and other activity. Expand a group to see its entries.</p></div><span className="count-pill">{selectedMember.timeline.length} entries in {workEntryGroups.length} groups</span></div>
             {workEntryGroups.length ? <div className="work-entry-groups">{workEntryGroups.map((group) => <details className="work-entry-group" key={group.key}>
               <summary><div><strong>{group.title}</strong><small>{group.key.startsWith('event:') ? 'Bulk event work' : group.key === 'walk-in-assets' ? 'Walk-in asset work' : 'Work entries'}</small></div><span className="count-pill">{group.entries.length} {group.entries.length === 1 ? 'entry' : 'entries'}</span><time>Latest {new Date(group.entries[0].createdAt).toLocaleString()}</time></summary>
               <div className="work-timeline">{group.entries.map((entry) => <article className={`work-timeline-entry ${entry.repeatIssue ? 'is-repeat-issue' : ''}`} key={entry._id}>

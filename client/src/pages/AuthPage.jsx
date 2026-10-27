@@ -3,17 +3,46 @@ import { useNavigate, Link } from 'react-router-dom';
 import { ArrowRight, ShieldCheck, Activity, Layers3, LockKeyhole, Eye, EyeOff } from 'lucide-react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import ThemeToggle from '../components/ThemeToggle.jsx';
 
 export default function AuthPage() {
   const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState({ email: '', password: '' });
   const { acceptSession } = useAuth();
   const navigate = useNavigate();
 
+  const validateField = (name, value) => {
+    if (name === 'email') {
+      const normalizedEmail = value.trim();
+      if (!normalizedEmail) return 'Enter your work email.';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return 'Enter a valid email address.';
+      }
+    }
+    if (name === 'password' && !value) return 'Enter your password.';
+    return '';
+  };
+
+  const updateField = (name, value) => {
+    setForm((current) => ({ ...current, [name]: value }));
+    if (fieldErrors[name]) {
+      setFieldErrors((current) => ({ ...current, [name]: validateField(name, value) }));
+    }
+    if (error) setError('');
+  };
+
   const submit = async (e) => {
     e.preventDefault();
+    const errors = {
+      email: validateField('email', form.email),
+      password: validateField('password', form.password)
+    };
+    setFieldErrors(errors);
+    if (errors.email || errors.password) return;
+
     setError('');
     setBusy(true);
 
@@ -93,6 +122,7 @@ export default function AuthPage() {
 
       {/* Sign-in Form Section */}
       <section className="tcs-auth-form-wrap">
+        <ThemeToggle className="theme-toggle-auth" />
         <div className="tcs-auth-form">
           <div className="mobile-tcs-brand">
             <div className="tcs-brand-mark">O</div>
@@ -109,7 +139,7 @@ export default function AuthPage() {
             Sign in with your work account to continue to your team’s workspace.
           </p>
 
-          <form className="form-stack" onSubmit={submit}>
+          <form className="form-stack" onSubmit={submit} noValidate>
             <label>
               Work Email
               <input
@@ -119,9 +149,16 @@ export default function AuthPage() {
                 spellCheck="false"
                 placeholder="engineer@company.com"
                 value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                onChange={(e) => updateField('email', e.target.value)}
+                onBlur={(e) => setFieldErrors((current) => ({
+                  ...current,
+                  email: validateField('email', e.target.value)
+                }))}
+                aria-invalid={Boolean(fieldErrors.email)}
+                aria-describedby={fieldErrors.email ? 'login-email-error' : undefined}
                 required
               />
+              {fieldErrors.email && <small className="field-error" id="login-email-error">{fieldErrors.email}</small>}
             </label>
 
             <label>
@@ -133,7 +170,13 @@ export default function AuthPage() {
                   autoComplete="current-password"
                   placeholder="Enter your password"
                   value={form.password}
-                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  onChange={(e) => updateField('password', e.target.value)}
+                  onBlur={(e) => setFieldErrors((current) => ({
+                    ...current,
+                    password: validateField('password', e.target.value)
+                  }))}
+                  aria-invalid={Boolean(fieldErrors.password)}
+                  aria-describedby={fieldErrors.password ? 'login-password-error' : undefined}
                   required
                 />
                 <button
@@ -146,6 +189,7 @@ export default function AuthPage() {
                   {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
                 </button>
               </span>
+              {fieldErrors.password && <small className="field-error" id="login-password-error">{fieldErrors.password}</small>}
             </label>
 
             <div className="forgot-link-row">

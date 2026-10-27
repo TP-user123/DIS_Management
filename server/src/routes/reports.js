@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { Activity, Asset, AssetHistory, AssetWorkEvent, Case, Handover, Task, Ticket, User, WorkReport } from '../models.js';
+import { Activity, Asset, AssetHistory, AssetWorkEvent, Case, Event, Handover, Task, Ticket, User, WorkReport } from '../models.js';
 import { auth, asyncHandler, requirePermission } from '../middleware.js';
 
 const router = Router();
@@ -40,6 +40,26 @@ function actionLabel(action) {
   return String(action || 'Activity').replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function eventDateKeys(event) {
+  const scheduled = [...(event.occurrenceDates || [])];
+  for (const update of event.occurrenceUpdates || []) {
+    if (update.additional && update.dateKey) scheduled.push(update.dateKey);
+  }
+  if (scheduled.length) return [...new Set(scheduled)].sort();
+
+  const start = new Date(event.startsAt);
+  const end = new Date(event.endsAt || event.startsAt);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return [];
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  const last = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()));
+  const dates = [];
+  while (cursor <= last && dates.length < 366) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
 // Team and personal work tracker. Managers can view the company; leads and engineers
 // can view their team scope and its reporting leads.
 router.get('/workload', asyncHandler(async (req, res) => {
@@ -59,8 +79,11 @@ router.get('/workload', asyncHandler(async (req, res) => {
   }
   const selectedIds = requestedUserId === 'all' ? allUserIds : [userMap.get(requestedUserId)._id];
   const selectedIdStrings = new Set(selectedIds.map(String));
+  const validDateKey = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const reportFromKey = validDateKey(req.query.dateFrom) ? req.query.dateFrom : createdAt.$gte.toISOString().slice(0, 10);
+  const reportToKey = validDateKey(req.query.dateTo) ? req.query.dateTo : createdAt.$lt.toISOString().slice(0, 10);
 
-  const [tasks, completedTasks, activities, assetHistory, workReports, handovers, assignedTickets, workloadAssets, assignedEvents] = await Promise.all([
+  const [tasks, completedTasks, activities, assetHistory, workReports, handovers, assignedTickets, workloadAssets, assignedAssetEvents, calendarEvents] = await Promise.all([
     Task.find({ companyId: req.companyId, assigneeId: { $in: selectedIds } })
       .select('taskNumber title status priority assigneeId assignedBy dueAt completedAt updatedAt')
       .lean(),
@@ -105,7 +128,19 @@ router.get('/workload', asyncHandler(async (req, res) => {
       isArchived: { $ne: true },
       assignedUserIds: { $in: selectedIds },
       $or: [{ scheduledAt: createdAt }, { scheduledAt: null, createdAt }]
-    }).select('title scheduledAt createdAt assignedUserIds').sort({ scheduledAt: 1, title: 1 }).lean() : []
+    }).select('title scheduledAt createdAt assignedUserIds').sort({ scheduledAt: 1, title: 1 }).lean() : [],
+    Event.find({
+      companyId: req.companyId,
+      $or: [
+        { occurrenceDates: { $elemMatch: { $gte: reportFromKey, $lt: reportToKey } } },
+        { 'occurrenceUpdates.dateKey': { $gte: reportFromKey, $lt: reportToKey } },
+        { $and: [
+          { $or: [{ occurrenceDates: { $exists: false } }, { occurrenceDates: { $size: 0 } }] },
+          { startsAt: { $lt: createdAt.$lt } },
+          { $or: [{ endsAt: { $gte: createdAt.$gte } }, { endsAt: null, startsAt: { $gte: createdAt.$gte } }] }
+        ] }
+      ]
+    }).select('title startsAt endsAt occurrenceDates occurrenceUpdates audience team assignedUserIds completedByIds').sort({ startsAt: 1, title: 1 }).lean()
   ]);
 
   const issueCyclesByUser = new Map(selectedIds.map((id) => [String(id), { completed: 0, pending: 0, walkIn: 0 }]));
@@ -153,10 +188,38 @@ router.get('/workload', asyncHandler(async (req, res) => {
     else counts.pending += 1;
   }
   const eventsByUser = new Map(selectedIds.map((id) => [String(id), []]));
-  for (const event of assignedEvents) {
+  for (const event of assignedAssetEvents) {
     for (const assigneeId of event.assignedUserIds || []) {
       const assignedTo = eventsByUser.get(String(assigneeId));
-      if (assignedTo) assignedTo.push({ _id: event._id, title: event.title, scheduledAt: event.scheduledAt || event.createdAt });
+      if (assignedTo) assignedTo.push({ _id: String(event._id), title: event.title, scheduledAt: event.scheduledAt || event.createdAt, status: 'SCHEDULED', dateKey: event.scheduledAt ? new Date(event.scheduledAt).toISOString().slice(0, 10) : '' });
+    }
+  }
+
+  for (const event of calendarEvents) {
+    const attendees = event.audience === 'USER'
+      ? (event.assignedUserIds || []).map(String).filter((id) => selectedIdStrings.has(id))
+      : users.filter((member) => member.team === event.team).map((member) => String(member._id));
+    if (!attendees.length) continue;
+    const updatesByUserDate = new Map((event.occurrenceUpdates || []).map((update) => [
+      `${String(update.userId)}:${update.dateKey}`,
+      update
+    ]));
+    const legacyCompletedIds = new Set((event.completedByIds || []).map(String));
+    const occurrences = eventDateKeys(event).filter((key) => key >= reportFromKey && key < reportToKey);
+    for (const dateKey of occurrences) {
+      for (const attendeeId of attendees) {
+        const update = updatesByUserDate.get(`${attendeeId}:${dateKey}`);
+        const status = update?.status || (legacyCompletedIds.has(attendeeId) ? 'DONE' : 'PENDING');
+        eventsByUser.get(attendeeId)?.push({
+          _id: `${String(event._id)}-${dateKey}`,
+          eventId: String(event._id),
+          title: event.title,
+          scheduledAt: event.startsAt,
+          dateKey,
+          status,
+          updatedAt: update?.updatedAt || null
+        });
+      }
     }
   }
 
@@ -180,6 +243,29 @@ router.get('/workload', asyncHandler(async (req, res) => {
   const assignerNames = new Map(assigners.map((person) => [String(person._id), person.name]));
 
   const timelines = new Map(selectedIds.map((id) => [String(id), []]));
+  for (const event of calendarEvents) {
+    const attendees = event.audience === 'USER'
+      ? (event.assignedUserIds || []).map(String).filter((id) => selectedIdStrings.has(id))
+      : users.filter((member) => member.team === event.team).map((member) => String(member._id));
+    const occurrenceDates = new Set(eventDateKeys(event));
+    const updates = event.occurrenceUpdates || [];
+    for (const update of updates) {
+      const updatedAt = new Date(update.updatedAt || event.startsAt);
+      if (update.status === 'PENDING' || !occurrenceDates.has(update.dateKey) || updatedAt < createdAt.$gte || updatedAt >= createdAt.$lt) continue;
+      const attendeeId = String(update.userId);
+      if (!attendees.includes(attendeeId)) continue;
+      const statusText = update.status === 'DONE' ? 'Done' : update.status === 'CANCELLED' ? 'Cancelled' : update.status === 'POSTPONED' ? 'Postponed' : 'Pending';
+      addTimeline(timelines, attendeeId, {
+        _id: `event-${event._id}-${attendeeId}-${update.dateKey}`,
+        source: 'EVENT',
+        title: `Event marked ${statusText.toLowerCase()}`,
+        subject: event.title,
+        status: update.status,
+        note: `Scheduled for ${update.dateKey}`,
+        createdAt: updatedAt
+      });
+    }
+  }
   for (const activity of activities) {
     const entity = entityMap.get(String(activity.entityId));
     const subject = entity?.taskNumber

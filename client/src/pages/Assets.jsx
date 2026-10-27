@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
   CalendarDays,
@@ -22,6 +23,7 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Modal from '../components/Modal.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import Pagination from '../components/Pagination.jsx';
 import Swal from '../utils/swal.js';
 
 const headers = ['Asset ID', 'User Name', 'Employee ID', 'Project', 'Issue', 'System Type'];
@@ -162,6 +164,8 @@ function historyTransition(value, formatter = (x) => x) {
 
 export default function Assets() {
   const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const userId = String(user?.id || user?._id || '');
   const isLead = ['MANAGER', 'TL', 'SL'].includes(user?.role);
   const canCreateEvent = isLead;
@@ -181,6 +185,10 @@ export default function Assets() {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [mineOnly, setMineOnly] = useState(false);
   const [view, setView] = useState('assets');
+  const [pageSize, setPageSize] = useState(10);
+  const [assetPage, setAssetPage] = useState(1);
+  const [issuePage, setIssuePage] = useState(1);
+  const [eventPage, setEventPage] = useState(1);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [newIssueMode, setNewIssueMode] = useState(false);
   const [intakeForm, setIntakeForm] = useState(emptyIntake);
@@ -359,6 +367,31 @@ export default function Assets() {
     });
   }, [issueRows, search, statusFilter, mineOnly, userId, user?.role]);
 
+  const paginatedAssets = useMemo(() => visibleAssets.slice((assetPage - 1) * pageSize, assetPage * pageSize), [visibleAssets, assetPage, pageSize]);
+  const paginatedIssueRows = useMemo(() => visibleIssueRows.slice((issuePage - 1) * pageSize, issuePage * pageSize), [visibleIssueRows, issuePage, pageSize]);
+  const paginatedEvents = useMemo(() => events.slice((eventPage - 1) * pageSize, eventPage * pageSize), [events, eventPage, pageSize]);
+  const assetPageCount = Math.max(1, Math.ceil(visibleAssets.length / pageSize));
+  const issuePageCount = Math.max(1, Math.ceil(visibleIssueRows.length / pageSize));
+  const eventPageCount = Math.max(1, Math.ceil(events.length / pageSize));
+
+  useEffect(() => {
+    setAssetPage(1);
+    setIssuePage(1);
+    setEventPage(1);
+  }, [search, statusFilter, mineOnly, view, pageSize]);
+
+  useEffect(() => {
+    if (assetPage > assetPageCount) setAssetPage(assetPageCount);
+  }, [assetPage, assetPageCount]);
+
+  useEffect(() => {
+    if (issuePage > issuePageCount) setIssuePage(issuePageCount);
+  }, [issuePage, issuePageCount]);
+
+  useEffect(() => {
+    if (eventPage > eventPageCount) setEventPage(eventPageCount);
+  }, [eventPage, eventPageCount]);
+
   const assignableMembers = useMemo(() => members.filter((member) => (
     user?.role === 'MANAGER' ||
     (user?.role === 'TL' && member.team === user.team) ||
@@ -380,7 +413,7 @@ export default function Assets() {
     myResolved: issueRows.filter((row) => String(row.resolvedBy?._id || row.resolvedBy || '') === userId).length
   }), [issueRows, userId]);
 
-  const visibleAssignableAssets = visibleAssets.filter((asset) => activeStatuses.includes(asset.status));
+  const visibleAssignableAssets = paginatedAssets.filter((asset) => activeStatuses.includes(asset.status));
   const selectedAssignableAssetIds = selectedAssetIds.filter((id) => {
     const asset = assets.find((row) => row._id === id);
     return asset && activeStatuses.includes(asset.status);
@@ -462,7 +495,7 @@ export default function Assets() {
     setEventOpen(true);
   };
 
-  const openIntake = () => {
+  const openIntake = useCallback(() => {
     setError('');
     setNewIssueMode(false);
     setIntakeForm(emptyIntake);
@@ -470,7 +503,13 @@ export default function Assets() {
     setLookupResults([]);
     setSelectedAsset(null);
     setIntakeOpen(true);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!location.state?.openCreate) return;
+    openIntake();
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [location.key, location.pathname, location.search, location.state, navigate, openIntake]);
 
   const openNextIssue = (asset) => {
     setError('');
@@ -879,7 +918,7 @@ export default function Assets() {
           </div>
           <div className="table-scroll"><table>
             <thead><tr><th>ASSET</th><th>ISSUE</th><th>ASSIGNED TO</th><th>STATUS</th><th>RESOLVED BY</th><th>REPORTED / RESOLVED</th><th>HISTORY</th></tr></thead>
-            <tbody>{visibleIssueRows.map((row) => {
+            <tbody>{paginatedIssueRows.map((row) => {
               const resolved = row.status === 'RESOLVED';
               return <tr key={row._id}>
                 <td><div className="asset-main-cell"><strong>{row.asset?.assetId}</strong><span>{[row.asset?.userName, row.asset?.employeeId, row.asset?.project].filter(Boolean).join(' · ') || 'No user details'}</span>{row.asset?.isArchived && <small className="work-table-sub">Archived from active register</small>}</div></td>
@@ -893,7 +932,7 @@ export default function Assets() {
             })}</tbody>
           </table></div>
           {!issueQueueLoading && !visibleIssueRows.length && <div className="empty-state compact"><div className="empty-icon"><ClipboardList size={21} /></div><strong>No matching issues</strong><p>Reported and resolved issue cycles will appear here separately for each asset.</p></div>}
-          <div className="table-footer"><span>{visibleIssueRows.length} issue(s) shown</span><span className="table-footer-right">Each issue keeps its own assignee, status, and resolver credit.</span></div>
+          <Pagination page={issuePage} pageSize={pageSize} totalItems={visibleIssueRows.length} itemLabel="issues" note="Each issue keeps its own assignee, status, and resolver credit." onPageChange={setIssuePage} onPageSizeChange={setPageSize} />
         </div> : view === 'assets' ? loading && !assets.length ? <LoadingState title="Loading asset register" detail="Getting the latest asset assignments and issue status." /> : <>
           <div className="table-toolbar">
             <div className="search-box"><Search size={16} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search asset, user, employee, project…" /></div>
@@ -909,7 +948,7 @@ export default function Assets() {
           </div>
           <div className="table-scroll"><table>
             <thead><tr>{isLead && <th><input aria-label="Select all visible assets" type="checkbox" checked={allVisibleSelected} onChange={toggleVisibleSelection} /></th>}<th>ASSET / USER</th><th>EMPLOYEE / PROJECT</th><th>SYSTEM</th><th>ISSUE / UPDATE</th><th>WORK EVENT</th><th>ASSIGNED TO</th><th>STATUS</th><th>HISTORY</th>{isLead && <th>REMOVE</th>}</tr></thead>
-            <tbody>{visibleAssets.map((asset) => {
+            <tbody>{paginatedAssets.map((asset) => {
               const assignedToMe = String(asset.assignedToId?._id || asset.assignedToId || '') === userId;
               const canUpdate = user?.role === 'RE' && assignedToMe;
               const resolved = ['READY_FOR_PICKUP', 'RETURNED'].includes(asset.status);
@@ -936,9 +975,9 @@ export default function Assets() {
             })}</tbody>
           </table></div>
           {!loading && !visibleAssets.length && <div className="empty-state compact"><div className="empty-icon"><Laptop size={21} /></div><strong>No matching assets</strong><p>Walk-in intakes and bulk event uploads appear in the shared register.</p></div>}
-          <div className="table-footer"><span>{visibleAssets.length} asset(s) shown</span><span className="table-footer-right">Latest status and issue changes are visible to your workspace.</span></div>
+          <Pagination page={assetPage} pageSize={pageSize} totalItems={visibleAssets.length} itemLabel="assets" note="Latest status and issue changes are visible to your workspace." onPageChange={setAssetPage} onPageSizeChange={setPageSize} />
       </> : eventsLoading && !eventsLoaded ? <LoadingState title="Loading bulk events" detail="Getting the latest event list." /> : <div className="asset-events-list">
-          {events.map((event) => <article className="asset-event-card" key={event._id}>
+          {paginatedEvents.map((event) => <article className="asset-event-card" key={event._id}>
             <div className="asset-event-icon"><CalendarDays size={18} /></div>
             <div className="asset-event-content"><div className="asset-event-title"><strong>{event.title}</strong><span>{event.assetCount} systems</span></div>
               <p>{event.description || 'Bulk software update or system support event'}</p>
@@ -947,6 +986,7 @@ export default function Assets() {
             </div>
           </article>)}
           {!events.length && <div className="empty-state compact"><div className="empty-icon"><CalendarDays size={21} /></div><strong>No bulk events yet</strong><p>Create an update event, add systems by spreadsheet or manual entry, and split the workload across engineers.</p></div>}
+          <Pagination page={eventPage} pageSize={pageSize} totalItems={events.length} itemLabel="bulk events" onPageChange={setEventPage} onPageSizeChange={setPageSize} />
         </div>}
       </section>
 

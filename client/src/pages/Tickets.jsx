@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Upload,
   Search,
@@ -69,12 +70,20 @@ const normalizeExcelDate = (v) => {
 };
 
 const isResolved = (s) => s === 'RESOLVED';
+const canShowAge = (ticket) => {
+  const status = ticket.workflowStatus || 'OPEN';
+  return status === 'OPEN' || status === 'WIP' || (!ticket.assigneeId && status !== 'RESOLVED');
+};
 
 export default function Tickets() {
   const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const currentUserId = String(user?.id || user?._id || '');
   const canAssignTickets = user?.role === 'MANAGER' || (user?.permissions || []).includes('tickets:assign');
   const canImport = user?.role === 'MANAGER' || (user?.permissions || []).includes('tickets:import');
+  const canCreateTicket = canImport || user?.role === 'RE';
+  const canReopenTicket = ['MANAGER', 'TL', 'SL'].includes(user?.role);
 
   // Core Data States
   const [items, setItems] = useState([]);
@@ -82,6 +91,7 @@ export default function Tickets() {
   const [selected, setSelected] = useState([]);
   const [search, setSearch] = useState('');
   const [priority, setPriority] = useState('ALL');
+  const [ageing, setAgeing] = useState('ALL');
   const [currentPage, setCurrentPage] = useState(1);
 const [pageSize, setPageSize] = useState(10);
 
@@ -104,6 +114,16 @@ const [pageSize, setPageSize] = useState(10);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    if (!location.state?.openCreate) return;
+    if (canCreateTicket) {
+      setError('');
+      setManualForm({ ...manualEmpty, requestType: location.state?.requestType || manualEmpty.requestType });
+      setManualOpen(true);
+    }
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [canCreateTicket, location.key, location.pathname, location.search, location.state, navigate]);
 
   // Eligible members for assignment based on role and team rules
   const eligibleMembers = useMemo(() => {
@@ -146,6 +166,7 @@ const [pageSize, setPageSize] = useState(10);
 
       // Priority filter
       if (priority !== 'ALL' && t.priorityName !== priority) return false;
+      if (ageing !== 'ALL' && (!canShowAge(t) || Number(t.ageDays) !== Number(ageing))) return false;
 
       // Search filter
       if (search.trim()) {
@@ -159,12 +180,22 @@ const [pageSize, setPageSize] = useState(10);
 
       return true;
     });
-  }, [items, activeTab, priority, search, currentUserId]);
+  }, [items, activeTab, priority, ageing, search, currentUserId]);
+
+  const availableAges = useMemo(
+    () => [...new Set(items.filter(canShowAge).map((ticket) => Number(ticket.ageDays)).filter((age) => Number.isFinite(age) && age >= 0))]
+      .sort((first, second) => first - second),
+    [items]
+  );
+
+  useEffect(() => {
+    if (ageing !== 'ALL' && !availableAges.includes(Number(ageing))) setAgeing('ALL');
+  }, [ageing, availableAges]);
 
   // Reset pagination when filters or tabs change
 useEffect(() => {
   setCurrentPage(1);
-}, [activeTab, priority, search, pageSize]);
+}, [activeTab, priority, ageing, search, pageSize]);
 
 // Calculate pagination
 const totalPages = Math.max(
@@ -212,7 +243,7 @@ const endItem = Math.min(
     total: items.length,
     open: items.filter((t) => !isResolved(t.workflowStatus || 'OPEN')).length,
     closed: items.filter((t) => isResolved(t.workflowStatus || 'OPEN')).length,
-    aging: items.filter((t) => !isResolved(t.workflowStatus || 'OPEN') && Number(t.ageDays) > 1).length
+    aging: items.filter((t) => canShowAge(t) && Number(t.ageDays) > 1).length
   }), [items]);
 
   // Selection Toggle Handlers - Exclude resolved tickets to prevent credit theft
@@ -262,14 +293,14 @@ const endItem = Math.min(
     }
   };
 
-  // Status Change Handler with SweetAlert Description Prompt & Strict Resolved Condition
+  // Status changes ask for a note; only leads can reopen or restore resolved tickets.
   const changeStatus = async (ticket, nextStatus) => {
     const currentStatus = ticket.workflowStatus || 'OPEN';
     if (nextStatus === currentStatus) return;
 
     // Strict Condition check: Once resolved, only allow Reopen or keep Resolved
-    if (currentStatus === 'RESOLVED' && nextStatus !== 'REOPEN' && nextStatus !== 'REOPENED') {
-      Swal.error('Action Not Allowed', 'A resolved ticket can only be reopened. Direct status change to Open or WIP is restricted.');
+    if (currentStatus === 'RESOLVED' && !['REOPEN', 'REOPENED', 'RESTORE'].includes(nextStatus)) {
+      Swal.error('Action Not Allowed', 'A resolved ticket can only be reopened or restored to its previous status.');
       return;
     }
 
@@ -278,7 +309,8 @@ const endItem = Math.min(
       WIP: 'Work In Progress',
       RESOLVED: 'Resolved',
       REOPEN: 'Reopen Ticket',
-      REOPENED: 'Reopened'
+      REOPENED: 'Reopened',
+      RESTORE: 'Restore previous status'
     };
 
     // Prompt for description via SweetAlert
@@ -296,14 +328,15 @@ const endItem = Math.min(
     setError('');
 
     try {
-      await api.patch(`/tickets/${ticket._id}/status`, {
+      const { data } = await api.patch(`/tickets/${ticket._id}/status`, {
         status: nextStatus,
         description
       });
-      Swal.success('Status Updated', `Ticket ${ticket.ticketNumber} is now ${labelMap[nextStatus]}.`);
+      const updatedStatus = data.ticket?.workflowStatus || (nextStatus === 'REOPEN' ? 'REOPENED' : nextStatus);
+      Swal.success('Status Updated', `Ticket ${ticket.ticketNumber} is now ${labelMap[updatedStatus] || updatedStatus}.`);
       await load();
       if (detailTicket && detailTicket._id === ticket._id) {
-        openTicketDetails({ ...ticket, workflowStatus: nextStatus === 'REOPEN' ? 'REOPENED' : nextStatus });
+        openTicketDetails({ ...ticket, ...data.ticket, workflowStatus: updatedStatus });
       }
     } catch (e) {
       Swal.error('Update Failed', e.response?.data?.message || 'Unable to update ticket status.');
@@ -478,7 +511,7 @@ const endItem = Math.min(
         t.sourceStatus,
         t.priorityName,
         new Date(t.loggedDate).toLocaleDateString(),
-        t.ageDays,
+        canShowAge(t) ? t.ageDays : '',
         t.assignee?.name || 'Unassigned',
         t.description
       ])
@@ -514,22 +547,24 @@ const endItem = Math.min(
               setManualForm(manualEmpty);
               setManualOpen(true);
             }}
-            disabled={!canImport}
+            disabled={!canCreateTicket}
           >
             <Plus size={16} /> Add ticket
           </button>
 
-          <label className={`btn btn-primary ${busy ? 'disabled' : ''}`}>
-            <Upload size={16} />
-            {busy ? 'Processing…' : 'Import Excel'}
-            <input
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              hidden
-              disabled={busy || !canImport}
-              onChange={importFile}
-            />
-          </label>
+          {canImport && (
+            <label className={`btn btn-primary ${busy ? 'disabled' : ''}`}>
+              <Upload size={16} />
+              {busy ? 'Processing…' : 'Import Excel'}
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                hidden
+                disabled={busy}
+                onChange={importFile}
+              />
+            </label>
+          )}
 
           <button className="btn btn-secondary" onClick={exportCsv}>
             <Download size={16} /> Export view
@@ -645,6 +680,17 @@ const endItem = Math.min(
               ))}
             </select>
 
+            <select
+              aria-label="Filter tickets by age"
+              value={ageing}
+              onChange={(e) => setAgeing(e.target.value)}
+            >
+              <option value="ALL">Any age</option>
+              {availableAges.map((age) => (
+                <option key={age} value={age}>{age} day{age === 1 ? '' : 's'}</option>
+              ))}
+            </select>
+
             <button className="icon-btn" title="Refresh queue" onClick={load}>
               <RefreshCw size={16} />
             </button>
@@ -655,13 +701,13 @@ const endItem = Math.min(
         {canAssignTickets && (
           <div className="bulk-assign-bar">
             <div>
-              <strong>{selected.length} ticket(s) selected</strong>
-              <span> · Assign selected tickets in one shot</span>
+              <strong>Assign tickets</strong>
+              <span> · {selected.length} selected</span>
             </div>
 
             <div className="bulk-actions">
-              <select value={target} onChange={(e) => setTarget(e.target.value)}>
-                <option value="">Choose recipient engineer…</option>
+              <select className="ticket-recipient-select" value={target} onChange={(e) => setTarget(e.target.value)}>
+                <option value="">Choose assignee…</option>
                 {eligibleMembers.map((m) => (
                   <option key={m._id || m.id} value={m._id || m.id}>
                     {m.name} · {m.role} ({m.team})
@@ -720,6 +766,8 @@ const endItem = Math.min(
                 const ticketStatus = t.workflowStatus || 'OPEN';
                 const isAssignee = String(t.assigneeId || '') === currentUserId;
                 const isTicketResolved = ticketStatus === 'RESOLVED';
+                const ticketShowsAge = canShowAge(t);
+                const canRestoreTicket = user?.role === 'MANAGER' || (user?.role === 'RE' && isAssignee);
 
                 return (
                   <tr
@@ -761,24 +809,27 @@ const endItem = Math.min(
                       </div>
                     </td>
 
-                    {/* Status: Strict condition - if RESOLVED, only allow RESOLVED or REOPEN by assigned person */}
+                    {/* Leads reopen resolved tickets; the assigned RE can restore the previous status. */}
                     <td onClick={(e) => e.stopPropagation()}>
                       {isTicketResolved ? (
-                        isAssignee ? (
+                        canReopenTicket || canRestoreTicket ? (
                           <select
                             className="inline-status ticket-status-resolved"
                             value="RESOLVED"
                             disabled={busy}
                             onChange={(e) => changeStatus(t, e.target.value)}
-                            title="Resolved (Mine): You can keep as Resolved or Reopen"
+                            title={canRestoreTicket && !canReopenTicket ? 'Restore this ticket to its previous status' : 'Reopen this ticket as a lead'}
                           >
-                            <option value="RESOLVED">Resolved (Mine)</option>
-                            <option value="REOPEN">Reopen Ticket</option>
+                            <option value="RESOLVED">Resolved</option>
+                            {canReopenTicket && <option value="REOPEN">Reopen Ticket</option>}
+                            {canRestoreTicket && (
+                              <option value="RESTORE">Restore previous status ({['OPEN', 'WIP', 'REOPENED', 'ROUTED'].includes(t.statusBeforeResolution) ? t.statusBeforeResolution : 'OPEN'})</option>
+                            )}
                           </select>
                         ) : (
                           <span
                             className="status-pill status-completed"
-                            title="Resolved by this engineer. Locked in their queue to protect credit of work."
+                            title="A Team Leader or Shift Lead can reopen this ticket; the assigned engineer can restore its previous status."
                             style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                           >
                             <Lock size={12} /> Resolved
@@ -794,6 +845,7 @@ const endItem = Math.min(
                         >
                           <option value="OPEN">Open</option>
                           <option value="WIP">Work in progress</option>
+                          {ticketStatus === 'ROUTED' && <option value="ROUTED">Routed</option>}
                           <option value="RESOLVED">Resolved</option>
                           {ticketStatus === 'REOPENED' && (
                             <option value="REOPENED">Reopened</option>
@@ -806,6 +858,8 @@ const endItem = Math.min(
                               ? 'status-wip'
                               : ticketStatus === 'REOPENED'
                               ? 'status-reopened'
+                              : ticketStatus === 'ROUTED'
+                              ? 'status-routed'
                               : 'status-open'
                           }`}
                           title={
@@ -818,6 +872,8 @@ const endItem = Math.min(
                             ? 'Work In Progress'
                             : ticketStatus === 'REOPENED'
                             ? 'Reopened'
+                            : ticketStatus === 'ROUTED'
+                            ? 'Routed'
                             : 'Open'}
                         </span>
                       )}
@@ -831,9 +887,9 @@ const endItem = Math.min(
                     </td>
 
                     <td>
-                      <span className={t.ageDays > 0 && !isTicketResolved ? 'aging-number' : ''}>
-                        {isTicketResolved ? `Closed · ${t.ageDays} day${t.ageDays === 1 ? '' : 's'}` : `${t.ageDays} day${t.ageDays === 1 ? '' : 's'}`}
-                      </span>
+                      {ticketShowsAge
+                        ? <span className={t.ageDays > 0 ? 'aging-number' : ''}>{t.ageDays} day{t.ageDays === 1 ? '' : 's'}</span>
+                        : <span className="muted-cell">—</span>}
                     </td>
 
                     <td>
@@ -980,7 +1036,9 @@ const endItem = Math.min(
               <div>
                 <small style={{ color: '#64748b', fontSize: '10px' }}>Age</small>
                 <div style={{ fontWeight: '700', fontSize: '13px' }}>
-                  {isResolved(detailTicket.workflowStatus || 'OPEN') ? `Closed · ${detailTicket.ageDays} day${detailTicket.ageDays === 1 ? '' : 's'}` : `${detailTicket.ageDays} day${detailTicket.ageDays === 1 ? '' : 's'}`}
+                  {canShowAge(detailTicket)
+                    ? `${detailTicket.ageDays} day${detailTicket.ageDays === 1 ? '' : 's'}`
+                    : '—'}
                 </div>
               </div>
             </div>
@@ -1087,6 +1145,7 @@ const endItem = Math.min(
                   <option>Incident</option>
                   <option>Service Request</option>
                   <option>Operational</option>
+                  <option>Walk-in User</option>
                   <option>Other</option>
                 </select>
               </label>
@@ -1114,15 +1173,23 @@ const endItem = Math.min(
                   required
                 />
               </label>
-              <label>
-                Current level
-                <input
-                  value={manualForm.currentLevel}
-                  onChange={(e) => setManualForm({ ...manualForm, currentLevel: e.target.value })}
-                  placeholder="e.g. L1"
-                />
-              </label>
+              {user?.role !== 'RE' && (
+                <label>
+                  Current level
+                  <input
+                    value={manualForm.currentLevel}
+                    onChange={(e) => setManualForm({ ...manualForm, currentLevel: e.target.value })}
+                    placeholder="e.g. L1"
+                  />
+                </label>
+              )}
             </div>
+
+            {user?.role === 'RE' && (
+              <div className="ticket-self-assignee" aria-label="Assigned to you">
+                <User size={15} /> Assigned to you: <strong>{user.name}</strong>
+              </div>
+            )}
 
             <label>
               Item / system

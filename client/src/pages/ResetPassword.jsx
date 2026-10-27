@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, KeyRound, ShieldCheck } from 'lucide-react';
 import api from '../api.js';
+import ThemeToggle from '../components/ThemeToggle.jsx';
 
 export default function ResetPassword() {
   const [params] = useSearchParams();
@@ -66,6 +67,7 @@ export default function ResetPassword() {
       </section>
 
       <section className="tcs-auth-form-wrap">
+        <ThemeToggle className="theme-toggle-auth" />
         <div className="tcs-auth-form">
           <div className="auth-lock">
             <KeyRound size={21} />

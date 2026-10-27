@@ -6,6 +6,15 @@ import { canAssign, ensureCompanyUser, logActivity } from '../utils.js';
 const router = Router();
 router.use(auth, requirePermission('tasks:view'));
 
+const parseDateOnly = (value) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.toISOString().slice(0, 10) === value ? date : null;
+};
+
+const toDateKey = (date) => new Date(date).toISOString().slice(0, 10);
+
 // GET /api/tasks
 router.get('/', asyncHandler(async (req, res) => {
   const filter = { companyId: req.companyId };
@@ -32,8 +41,34 @@ router.get('/', asyncHandler(async (req, res) => {
 
 // POST /api/tasks - Create task
 router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res) => {
-  const { title, description, priority, team, location, frequency, dueAt, assigneeId, category } = req.body;
+  const { title, description, priority, team, location, frequency, dueAt, assigneeId, category, scheduleDates } = req.body;
   if (!title?.trim()) return res.status(400).json({ message: 'Task title is required.' });
+
+  const taskCategory = ['OPERATIONAL', 'INCIDENT_FOLLOWUP', 'GENERAL'].includes(category) ? category : 'OPERATIONAL';
+  let normalizedScheduleDates = [];
+  if (taskCategory === 'OPERATIONAL') {
+    if (!Array.isArray(scheduleDates) || !scheduleDates.length) {
+      return res.status(400).json({ message: 'Select at least one date for this operational task.' });
+    }
+    if (!['MANAGER', 'TL', 'SL'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only a Shift Lead, Team Leader, or Manager can schedule operational task dates.' });
+    }
+    if (scheduleDates.length > 100) return res.status(400).json({ message: 'An operational task can have up to 100 schedule dates.' });
+
+    const uniqueDates = new Set();
+    normalizedScheduleDates = scheduleDates.map((value) => {
+      const date = parseDateOnly(value);
+      if (!date) return null;
+      const key = toDateKey(date);
+      if (uniqueDates.has(key)) return null;
+      uniqueDates.add(key);
+      return { date, status: 'PENDING' };
+    });
+    if (normalizedScheduleDates.some((date) => !date)) {
+      return res.status(400).json({ message: 'Schedule dates must be valid and cannot contain duplicates.' });
+    }
+    normalizedScheduleDates.sort((a, b) => a.date - b.date);
+  }
 
   let target = null;
   if (assigneeId) {
@@ -48,7 +83,7 @@ router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res
     taskNumber: `TASK-${String(count + 1).padStart(5, '0')}`,
     title: title.trim(),
     description: description || '',
-    category: ['OPERATIONAL', 'INCIDENT_FOLLOWUP', 'GENERAL'].includes(category) ? category : 'OPERATIONAL',
+    category: taskCategory,
     priority: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].includes(priority) ? priority : 'MEDIUM',
     status: target ? 'ASSIGNED' : 'OPEN',
     createdBy: req.user._id,
@@ -56,8 +91,9 @@ router.post('/', requirePermission('tasks:create'), asyncHandler(async (req, res
     assigneeId: target ? target._id : null,
     team: team || req.user.team || 'IT Support',
     location: location || '',
-    frequency: ['DAILY', 'WEEKLY', 'QUARTERLY'].includes(frequency) ? frequency : 'ONE_TIME',
-    dueAt: dueAt || null
+    frequency: taskCategory === 'OPERATIONAL' ? 'ONE_TIME' : ['DAILY', 'WEEKLY', 'QUARTERLY'].includes(frequency) ? frequency : 'ONE_TIME',
+    scheduleDates: normalizedScheduleDates,
+    dueAt: normalizedScheduleDates[0]?.date || dueAt || null
   });
 
   const activityWrite = logActivity({
@@ -118,6 +154,9 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     if (!['OPEN', 'ASSIGNED', 'WIP', 'PENDING', 'COMPLETED'].includes(req.body.status)) {
       return res.status(400).json({ message: 'Invalid task status.' });
     }
+    if (req.body.status === 'COMPLETED' && task.scheduleDates.some((occurrence) => occurrence.status === 'PENDING')) {
+      return res.status(400).json({ message: 'Complete or cancel each scheduled date from its task timeline before completing this task.' });
+    }
     task.status = req.body.status;
     if (req.body.status === 'COMPLETED') task.completedAt = new Date();
     else task.completedAt = null;
@@ -133,6 +172,99 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     performedBy: req.user._id,
     comment: req.body.remarks || req.body.description || '',
     details: req.body
+  });
+
+  res.json(task);
+}));
+
+// PATCH /api/tasks/:id/schedule/:scheduleId - Complete, postpone, or cancel one scheduled date.
+router.patch('/:id/schedule/:scheduleId', asyncHandler(async (req, res) => {
+  const task = await Task.findOne({ _id: req.params.id, companyId: req.companyId });
+  if (!task) return res.status(404).json({ message: 'Task not found.' });
+  if (task.category !== 'OPERATIONAL' || !task.scheduleDates.length) {
+    return res.status(400).json({ message: 'This task does not have a date schedule.' });
+  }
+
+  const isAssignee = task.assigneeId && String(task.assigneeId) === String(req.user._id);
+  const isLead = ['MANAGER', 'TL', 'SL'].includes(req.user.role);
+  if (task.assigneeId ? (!isAssignee && !isLead) : !isLead) {
+    return res.status(403).json({ message: 'Only the assigned engineer or an SL/TL lead can action this schedule.' });
+  }
+
+  const occurrence = task.scheduleDates.id(req.params.scheduleId);
+  if (!occurrence) return res.status(404).json({ message: 'Scheduled date not found.' });
+  if (occurrence.status !== 'PENDING') {
+    return res.status(409).json({ message: 'This scheduled date has already been completed or cancelled.' });
+  }
+
+  const earliestPending = task.scheduleDates
+    .filter((entry) => entry.status === 'PENDING')
+    .sort((a, b) => a.date - b.date)[0];
+  if (!earliestPending || String(earliestPending._id) !== String(occurrence._id)) {
+    return res.status(409).json({ message: 'Action the earliest pending scheduled date first.' });
+  }
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  if (toDateKey(occurrence.date) > todayKey) {
+    return res.status(400).json({ message: 'This scheduled date is not due yet.' });
+  }
+
+  const action = String(req.body.action || '').toUpperCase();
+  const previousDate = occurrence.date;
+  const now = new Date();
+
+  if (action === 'POSTPONE') {
+    const nextDate = parseDateOnly(req.body.date);
+    const nextDateKey = nextDate && toDateKey(nextDate);
+    if (!nextDate || nextDateKey <= todayKey) {
+      return res.status(400).json({ message: 'Choose a date after today to postpone this occurrence.' });
+    }
+    const alreadyScheduled = task.scheduleDates.some((entry) => (
+      String(entry._id) !== String(occurrence._id)
+      && entry.status === 'PENDING'
+      && toDateKey(entry.date) === nextDateKey
+    ));
+    if (alreadyScheduled) return res.status(409).json({ message: 'Another pending occurrence is already scheduled for that date.' });
+
+    occurrence.date = nextDate;
+    occurrence.actionBy = req.user._id;
+    occurrence.history.push({ action: 'POSTPONED', fromDate: previousDate, toDate: nextDate, performedBy: req.user._id, performedAt: now });
+  } else if (action === 'DONE') {
+    occurrence.status = 'DONE';
+    occurrence.completedAt = now;
+    occurrence.actionBy = req.user._id;
+    occurrence.history.push({ action: 'DONE', fromDate: previousDate, performedBy: req.user._id, performedAt: now });
+  } else if (action === 'CANCEL') {
+    occurrence.status = 'CANCELLED';
+    occurrence.cancelledAt = now;
+    occurrence.actionBy = req.user._id;
+    occurrence.history.push({ action: 'CANCELLED', fromDate: previousDate, performedBy: req.user._id, performedAt: now });
+  } else {
+    return res.status(400).json({ message: 'Choose Done, Postpone, or Cancel for this scheduled date.' });
+  }
+
+  const nextOccurrence = task.scheduleDates
+    .filter((entry) => entry.status === 'PENDING')
+    .sort((a, b) => a.date - b.date)[0];
+  task.dueAt = nextOccurrence?.date || null;
+  if (!nextOccurrence) {
+    task.status = 'COMPLETED';
+    task.completedAt = now;
+  }
+  await task.save();
+
+  await logActivity({
+    companyId: req.companyId,
+    entityType: 'TASK',
+    entityId: task._id,
+    action: `TASK_SCHEDULE_${action}`,
+    performedBy: req.user._id,
+    details: {
+      scheduleId: occurrence._id,
+      previousDate,
+      nextDate: action === 'POSTPONE' ? occurrence.date : null,
+      nextDueAt: task.dueAt
+    }
   });
 
   res.json(task);

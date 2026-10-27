@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { Ticket, User, Notification, Activity } from '../models.js';
-import { auth, asyncHandler, requirePermission } from '../middleware.js';
+import { auth, asyncHandler, permissionCheck, requirePermission } from '../middleware.js';
 import { canAssign, ensureCompanyUser, logActivity } from '../utils.js';
  import { normalizeWorkflowStatus, ticketAgeDays } from '../ticketRules.js';
 
@@ -73,7 +73,11 @@ router.get('/:id/logs', asyncHandler(async (req, res) => {
   })));
 }));
 
-router.post('/manual', requirePermission('tickets:import'), asyncHandler(async (req, res) => {
+router.post('/manual', asyncHandler(async (req, res) => {
+  const isEngineerCreate = req.user.role === 'RE';
+  if (!isEngineerCreate && !(await permissionCheck(req, 'tickets:import'))) {
+    return res.status(403).json({ message: 'You do not have permission to create tickets.' });
+  }
   const ticketNumber = String(req.body.ticketNumber || '').trim();
   if (!ticketNumber) return res.status(400).json({ message: 'Ticket number is required.' });
   if (await Ticket.findOne({ companyId: req.companyId, ticketNumber })) {
@@ -83,21 +87,25 @@ router.post('/manual', requirePermission('tickets:import'), asyncHandler(async (
   const loggedDate = req.body.loggedDate ? new Date(req.body.loggedDate) : new Date();
   if (Number.isNaN(loggedDate.getTime())) return res.status(400).json({ message: 'Logged date is invalid.' });
 
+  const assignmentUpdatedAt = isEngineerCreate ? new Date() : null;
   const ticket = await Ticket.create({
     companyId: req.companyId,
     ticketNumber,
-    sourceStatus: String(req.body.sourceStatus || 'Open'),
+    sourceStatus: isEngineerCreate ? 'Open' : String(req.body.sourceStatus || 'Open'),
     workflowStatus: 'OPEN',
-    solutionProvider: String(req.body.solutionProvider || ''),
-    currentLevel: String(req.body.currentLevel || ''),
+    solutionProvider: isEngineerCreate ? '' : String(req.body.solutionProvider || ''),
+    currentLevel: isEngineerCreate ? '' : String(req.body.currentLevel || ''),
     loggedDate,
     item: String(req.body.item || ''),
     requestType: String(req.body.requestType || 'Incident'),
     priorityName: String(req.body.priorityName || 'Medium'),
     description: String(req.body.description || ''),
     remarks: String(req.body.remarks || ''),
+    assigneeId: isEngineerCreate ? req.user._id : null,
+    assignedBy: isEngineerCreate ? req.user._id : null,
+    assignmentUpdatedAt,
     createdBy: req.user._id,
-    sourceRow: { entryMethod: 'MANUAL' }
+    sourceRow: { entryMethod: req.body.requestType === 'Walk-in User' ? 'WALK_IN' : 'MANUAL' }
   });
 
   await logActivity({
@@ -107,7 +115,7 @@ router.post('/manual', requirePermission('tickets:import'), asyncHandler(async (
     action: 'TICKET_CREATED_MANUALLY',
     performedBy: req.user._id,
     comment: req.body.remarks || req.body.description || '',
-    details: { ticketNumber }
+    details: { ticketNumber, assigneeId: isEngineerCreate ? String(req.user._id) : null }
   });
 
   res.status(201).json({ message: 'Ticket created.', ticket });
@@ -341,16 +349,47 @@ router.post('/assign-bulk', requirePermission('tickets:assign'), asyncHandler(as
   res.json({ assigned: rows.length, assignee: target.name });
 }));
 
-// PATCH /api/tickets/:id/status - Status update with SweetAlert description support and strict Resolved condition
+// PATCH /api/tickets/:id/status - status updates, lead-only reopening, and engineer restoration
 router.patch('/:id/status', asyncHandler(async (req, res) => {
   const ticket = await Ticket.findOne({ _id: req.params.id, companyId: req.companyId });
   if (!ticket) return res.status(404).json({ message: 'Ticket not found.' });
 
   const isAssignee = ticket.assigneeId && String(ticket.assigneeId) === String(req.user._id);
   const isLead = ['MANAGER', 'TL', 'SL'].includes(req.user.role);
+  const canRestore = req.user.role === 'MANAGER' || (req.user.role === 'RE' && isAssignee);
+  const currentStatus = ticket.workflowStatus || 'OPEN';
+  const requestedStatus = String(req.body.status || '').toUpperCase();
+  const isRestoreAction = requestedStatus === 'RESTORE';
+  let next = requestedStatus;
+  if (next === 'REOPEN') next = 'REOPENED';
 
-  // Strict Rule: Once assigned, only the assigned engineer can edit/change status
-  if (ticket.assigneeId && !isAssignee) {
+  if (isRestoreAction) {
+    if (currentStatus !== 'RESOLVED') {
+      return res.status(400).json({ message: 'Only a resolved ticket can be restored to its previous status.' });
+    }
+    if (!canRestore) {
+      return res.status(403).json({ message: 'Only the assigned engineer can restore a resolved ticket to its previous status.' });
+    }
+    next = ['OPEN', 'WIP', 'REOPENED', 'ROUTED'].includes(ticket.statusBeforeResolution)
+      ? ticket.statusBeforeResolution
+      : 'OPEN';
+  }
+
+  const validStatuses = ['OPEN', 'WIP', 'RESOLVED', 'REOPENED'];
+  if (!validStatuses.includes(next) && !(isRestoreAction && next === 'ROUTED')) {
+    return res.status(400).json({ message: 'Status must be OPEN, WIP, RESOLVED, or REOPENED.' });
+  }
+
+  const isReopenAction = currentStatus === 'RESOLVED' && next === 'REOPENED' && !isRestoreAction;
+  if (isReopenAction && !isLead) {
+    return res.status(403).json({ message: 'Only a Team Leader, Shift Lead, or Manager can reopen a resolved ticket.' });
+  }
+  if (next === 'REOPENED' && !isLead && !isRestoreAction) {
+    return res.status(403).json({ message: 'Only a Team Leader, Shift Lead, or Manager can reopen tickets.' });
+  }
+
+  // Leads can reopen any resolved ticket; other status changes remain restricted to its assignee.
+  if (ticket.assigneeId && !isAssignee && !isReopenAction && !isRestoreAction) {
     return res.status(403).json({ message: 'This ticket is assigned to another engineer. Only the assigned person can edit or update this ticket.' });
   }
 
@@ -358,23 +397,10 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Only a lead can update an unassigned ticket.' });
   }
 
-  let next = String(req.body.status || '').toUpperCase();
-  if (next === 'REOPEN') next = 'REOPENED';
-
-  const validStatuses = ['OPEN', 'WIP', 'RESOLVED', 'REOPENED'];
-  if (!validStatuses.includes(next)) {
-    return res.status(400).json({ message: 'Status must be OPEN, WIP, RESOLVED, or REOPENED.' });
-  }
-
-  // Strict condition: Once a ticket is RESOLVED, only allow keeping it RESOLVED or REOPENING it!
-  const currentStatus = ticket.workflowStatus || 'OPEN';
+  // A resolved ticket can remain resolved, be reopened, or return to its last active status.
   if (currentStatus === 'RESOLVED') {
-    if (!['RESOLVED', 'REOPENED'].includes(next)) {
-      return res.status(400).json({ message: 'A resolved ticket can only be kept as RESOLVED or changed to REOPEN.' });
-    }
-    // Only the assigned engineer who resolved it can reopen it
-    if (next === 'REOPENED' && !isAssignee) {
-      return res.status(403).json({ message: 'Only the engineer who resolved this ticket can reopen it. It remains locked in their queue to protect credit of work.' });
+    if (!['RESOLVED', 'REOPENED'].includes(next) && !isRestoreAction) {
+      return res.status(400).json({ message: 'A resolved ticket can only remain resolved, reopen, or restore its previous status.' });
     }
   }
 
@@ -385,9 +411,10 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
   ticket.statusUpdatedBy = req.user._id;
   ticket.statusUpdatedAt = statusAt;
   if (next === 'RESOLVED') {
+    if (currentStatus !== 'RESOLVED') ticket.statusBeforeResolution = currentStatus;
     ticket.resolvedBy = req.user._id;
     ticket.resolvedAt = statusAt;
-  } else if (next === 'REOPENED') {
+  } else if (isReopenAction || isRestoreAction) {
     ticket.reopenedAt = statusAt;
     ticket.ageStartedAt = statusAt;
     ticket.resolvedAt = null;
@@ -402,26 +429,33 @@ router.patch('/:id/status', asyncHandler(async (req, res) => {
     companyId: req.companyId,
     entityType: 'TICKET',
     entityId: ticket._id,
-    action: next === 'REOPENED' ? 'TICKET_REOPENED' : 'TICKET_STATUS_CHANGED',
+    action: isReopenAction ? 'TICKET_REOPENED' : isRestoreAction ? 'TICKET_STATUS_RESTORED' : 'TICKET_STATUS_CHANGED',
     performedBy: req.user._id,
     comment: description,
     details: {
       previousStatus: currentStatus,
       status: next,
+      restoredPreviousStatus: isRestoreAction,
       description
     }
   });
 
-  if (ticket.assignedBy && String(ticket.assignedBy) !== String(req.user._id)) {
+  const statusNoticeUserIds = new Set(
+    [ticket.assignedBy, (isReopenAction || isRestoreAction) ? ticket.assigneeId : null]
+      .filter(Boolean)
+      .map(String)
+      .filter(id => id !== String(req.user._id))
+  );
+  for (const userId of statusNoticeUserIds) {
     try {
       await Notification.create({
         companyId: req.companyId,
-        userId: ticket.assignedBy,
+        userId,
         type: 'TICKET',
-        title: 'Ticket status updated',
+        title: isReopenAction ? 'Ticket reopened by a lead' : isRestoreAction ? 'Ticket status restored' : 'Ticket status updated',
         message: `${ticket.ticketNumber} is now ${next}.${description ? ' Remarks: ' + description : ''}`,
         link: '/tickets',
-        dedupeKey: `ticket-status-${ticket._id}-${next}-${Date.now()}`
+        dedupeKey: `ticket-status-${ticket._id}-${next}-${userId}-${Date.now()}`
       });
     } catch {}
   }
@@ -488,9 +522,11 @@ router.get('/summary', asyncHandler(async (req, res) => {
   const all = await Ticket.find(filter).select('ticketNumber item description workflowStatus sourceStatus priorityName loggedDate ageStartedAt reopenedAt resolvedAt statusUpdatedAt assigneeId').lean();
   const status = t => normalizeWorkflowStatus(t.workflowStatus || t.sourceStatus);
   const open = all.filter(t => !isResolved(status(t)));
+  const ageRelevant = t => status(t) === 'OPEN' || status(t) === 'WIP' || (!t.assigneeId && !isResolved(status(t)));
   const now = new Date();
   const age = t => ticketAgeDays(t, now);
-  const agingRows = open.filter(t => age(t) > 1).sort((a, b) => age(b) - age(a));
+  const agingCandidates = open.filter(ageRelevant);
+  const agingRows = agingCandidates.filter(t => age(t) > 1).sort((a, b) => age(b) - age(a));
   const assigneeIds = [...new Set(agingRows.map(t => String(t.assigneeId || '')).filter(Boolean))];
   const assignees = assigneeIds.length
     ? await User.find({ _id: { $in: assigneeIds }, companyId: req.companyId }).select('_id name role').lean()
@@ -503,7 +539,7 @@ router.get('/summary', asyncHandler(async (req, res) => {
     closed: all.length - open.length,
     unassigned: all.filter(t => !t.assigneeId && !isResolved(status(t))).length,
     aging: agingRows.length,
-    oldestAge: open.length ? Math.max(...open.map(age)) : 0,
+    oldestAge: agingCandidates.length ? Math.max(...agingCandidates.map(age)) : 0,
     agingTickets: agingRows.slice(0, 10).map(t => ({
       _id: t._id,
       ticketNumber: t.ticketNumber,

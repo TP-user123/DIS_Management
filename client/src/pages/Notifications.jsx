@@ -9,7 +9,8 @@ import {
   CalendarDays,
   ArrowRightLeft,
   ShieldCheck,
-  AlertCircle
+  AlertCircle,
+  Trash2
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
@@ -27,6 +28,12 @@ const icons = {
 export default function Notifications() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
+  const [deletingId, setDeletingId] = useState('');
+  const [desktopPermission, setDesktopPermission] = useState(() => (
+    typeof window !== 'undefined' && 'Notification' in window
+      ? window.Notification.permission
+      : 'unsupported'
+  ));
 
   const load = () => {
     api.get('/notifications')
@@ -41,6 +48,7 @@ export default function Notifications() {
   const markRead = async (id) => {
     try {
       await api.patch(`/notifications/${id}/read`, {});
+      window.dispatchEvent(new Event('opsdesk:notifications-updated'));
       load();
     } catch (e) {
       setError(e.response?.data?.message || 'Could not mark notification as read.');
@@ -50,9 +58,36 @@ export default function Notifications() {
   const markAllRead = async () => {
     try {
       await api.post('/notifications/read-all');
+      window.dispatchEvent(new Event('opsdesk:notifications-updated'));
       load();
     } catch {
       setError('Could not mark notifications as read.');
+    }
+  };
+
+  const enableDesktopAlerts = async () => {
+    if (!('Notification' in window)) {
+      setDesktopPermission('unsupported');
+      return;
+    }
+    try {
+      const permission = await window.Notification.requestPermission();
+      setDesktopPermission(permission);
+    } catch {
+      setError('Could not request desktop alert permission. Check your browser settings.');
+    }
+  };
+
+  const deleteNotification = async (id) => {
+    setDeletingId(id);
+    try {
+      await api.delete(`/notifications/${id}`);
+      setItems((current) => current.filter((notification) => notification._id !== id));
+      window.dispatchEvent(new Event('opsdesk:notifications-updated'));
+    } catch (e) {
+      setError(e.response?.data?.message || 'Could not delete this notification.');
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -65,13 +100,25 @@ export default function Notifications() {
             Notifications<span className="title-period">.</span>
           </h1>
           <p>
-            Real-time updates on ticket assignments, broadcast handovers, event invitations, and engineer issues.
+            Updates on ticket assignments, handovers, event invitations, and engineer issues. Desktop alerts appear while this app is open in the background.
           </p>
         </div>
-
-        <button className="btn btn-secondary" onClick={markAllRead}>
-          <CheckCheck size={16} /> Mark all as read
-        </button>
+        <div className="notification-page-actions">
+          {desktopPermission === 'granted' ? (
+            <span className="notification-desktop-status">Desktop alerts enabled</span>
+          ) : desktopPermission === 'unsupported' ? (
+            <span className="notification-desktop-status">Desktop alerts unavailable</span>
+          ) : desktopPermission === 'denied' ? (
+            <span className="notification-desktop-status">Allow alerts in browser settings</span>
+          ) : (
+            <button className="btn btn-secondary" type="button" onClick={enableDesktopAlerts}>
+              <Bell size={16} /> Enable desktop alerts
+            </button>
+          )}
+          <button className="btn btn-secondary" type="button" onClick={markAllRead}>
+            <CheckCheck size={16} /> Mark all as read
+          </button>
+        </div>
       </div>
 
       {error && <div className="error-box">{error}</div>}
@@ -105,6 +152,16 @@ export default function Notifications() {
                     Mark read
                   </button>
                 )}
+                <button
+                  className="icon-btn notification-delete"
+                  type="button"
+                  title="Delete this notification only"
+                  aria-label={`Delete notification: ${n.title}`}
+                  disabled={deletingId === n._id}
+                  onClick={() => deleteNotification(n._id)}
+                >
+                  <Trash2 size={15} />
+                </button>
               </div>
             </div>
           );

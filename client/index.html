@@ -3,9 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f7f8fa" />
+    <meta name="theme-color" content="#0B1120" />
     <meta name="description" content="OpsDesk Pro — Enterprise IT Support Operations, Ticket Orchestration and Service Desk Workspace." />
     <title>OpsDesk Pro — Enterprise IT Operations Workspace</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem('opsdesk_theme');
+        const theme = savedTheme === 'light' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.querySelector('meta[name="theme-color"]')?.setAttribute(
+          'content',
+          theme === 'dark' ? '#0B1120' : '#F5F7FC'
+        );
+      } catch {
+        document.documentElement.dataset.theme = 'dark';
+        document.documentElement.style.colorScheme = 'dark';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -11,14 +11,19 @@ import {
   Users,
   AlertTriangle,
   RefreshCw,
-  Lock
+  Lock,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  X
 } from 'lucide-react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Modal from '../components/Modal.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import Pagination from '../components/Pagination.jsx';
 import Swal from '../utils/swal.js';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 const emptyTaskForm = {
   title: '',
@@ -29,15 +34,188 @@ const emptyTaskForm = {
   location: '',
   frequency: 'ONE_TIME',
   dueAt: '',
+  scheduleDates: [],
   assigneeId: ''
 };
+
+const getDateKey = (value) => {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
+};
+
+const getTodayKey = () => new Date().toISOString().slice(0, 10);
+
+const getDateLabel = (value) => {
+  const key = getDateKey(value);
+  if (!key) return 'No date';
+  return new Date(`${key}T00:00:00.000Z`).toLocaleDateString(undefined, {
+    timeZone: 'UTC',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+};
+
+const getNextScheduleOccurrence = (task) => [...(task.scheduleDates || [])]
+  .filter((occurrence) => occurrence.status === 'PENDING')
+  .sort((a, b) => getDateKey(a.date).localeCompare(getDateKey(b.date)))[0] || null;
+
+function MultiDatePicker({ selectedDates, onChange }) {
+  const [visibleMonth, setVisibleMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const year = visibleMonth.getFullYear();
+  const month = visibleMonth.getMonth();
+  const monthName = visibleMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const dayCount = new Date(year, month + 1, 0).getDate();
+  const today = (() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  })();
+  const days = Array.from({ length: dayCount }, (_, index) => index + 1);
+
+  const toggleDate = (dateKey) => {
+    const nextDates = selectedDates.includes(dateKey)
+      ? selectedDates.filter((date) => date !== dateKey)
+      : [...selectedDates, dateKey];
+    onChange(nextDates.sort());
+  };
+
+  return (
+    <section className="task-date-picker" aria-label="Choose operational task dates">
+      <div className="task-date-picker-heading">
+        <div>
+          <strong>Schedule dates</strong>
+          <small>Select one or more dates. Each date becomes a task occurrence.</small>
+        </div>
+        <span className="task-date-count">{selectedDates.length} selected</span>
+      </div>
+
+      <div className="task-date-calendar">
+        <div className="task-date-calendar-header">
+          <button type="button" className="icon-btn" aria-label="Previous month" onClick={() => setVisibleMonth(new Date(year, month - 1, 1))}>
+            <ChevronLeft size={17} />
+          </button>
+          <strong>{monthName}</strong>
+          <button type="button" className="icon-btn" aria-label="Next month" onClick={() => setVisibleMonth(new Date(year, month + 1, 1))}>
+            <ChevronRight size={17} />
+          </button>
+        </div>
+
+        <div className="task-date-calendar-grid" role="group" aria-label={`${monthName} dates`}>
+          {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((day) => (
+            <span className="task-date-weekday" key={day}>{day}</span>
+          ))}
+          {Array.from({ length: firstWeekday }, (_, index) => <span className="task-date-empty" key={`empty-${index}`} />)}
+          {days.map((day) => {
+            const dateKey = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            const isSelected = selectedDates.includes(dateKey);
+            return (
+              <button
+                className={`task-date-day${isSelected ? ' is-selected' : ''}${dateKey === today ? ' is-today' : ''}`}
+                type="button"
+                key={dateKey}
+                aria-label={new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { dateStyle: 'full' })}
+                aria-pressed={isSelected}
+                onClick={() => toggleDate(dateKey)}
+              >
+                {day}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="task-date-selection" aria-live="polite">
+        {selectedDates.length ? selectedDates.map((dateKey) => (
+          <span className="task-date-chip" key={dateKey}>
+            <CalendarDays size={13} /> {getDateLabel(dateKey)}
+            <button type="button" aria-label={`Remove ${getDateLabel(dateKey)}`} onClick={() => toggleDate(dateKey)}><X size={13} /></button>
+          </span>
+        )) : <small className="task-date-empty-hint">No dates selected yet.</small>}
+      </div>
+    </section>
+  );
+}
+
+function TaskScheduleTimeline({ task, canAct, busy, postponeForm, onAction, onStartPostpone, onPostponeDateChange, onSavePostpone, onCancelPostpone }) {
+  const schedule = [...(task.scheduleDates || [])].sort((a, b) => getDateKey(a.date).localeCompare(getDateKey(b.date)));
+  if (!schedule.length) return <span>{task.dueAt ? getDateLabel(task.dueAt) : '—'}</span>;
+
+  const nextOccurrence = getNextScheduleOccurrence(task);
+  const isDue = nextOccurrence && getDateKey(nextOccurrence.date) <= getTodayKey();
+  const isPostponing = postponeForm?.taskId === String(task._id)
+    && postponeForm?.scheduleId === String(nextOccurrence?._id);
+  const nextOccurrenceBusy = busy === `${task._id}:${nextOccurrence?._id}`;
+
+  return (
+    <div className="task-schedule-cell">
+      <div className="task-schedule-next">
+        <strong>{nextOccurrence ? getDateLabel(nextOccurrence.date) : 'All dates closed'}</strong>
+        {nextOccurrence && <span className={`task-schedule-state${isDue ? ' is-due' : ''}`}>{isDue ? 'Due' : 'Upcoming'}</span>}
+      </div>
+
+      {nextOccurrence && canAct && isDue && !isPostponing && (
+        <div className="task-schedule-actions">
+          <button type="button" className="btn btn-secondary btn-xs" disabled={nextOccurrenceBusy} onClick={() => onStartPostpone(task, nextOccurrence)}>
+            <Clock size={12} /> Postpone
+          </button>
+          <button type="button" className="btn btn-primary btn-xs" disabled={nextOccurrenceBusy} onClick={() => onAction(task, nextOccurrence, 'DONE')}>
+            <CheckCircle2 size={12} /> Done
+          </button>
+          <button type="button" className="btn btn-danger-ghost btn-xs" disabled={nextOccurrenceBusy} onClick={() => onAction(task, nextOccurrence, 'CANCEL')}>
+            <X size={12} /> Cancel
+          </button>
+        </div>
+      )}
+
+      {isPostponing && (
+        <div className="task-postpone-control">
+          <label>
+            Move to
+            <input type="date" min={postponeForm.minDate} value={postponeForm.date} onChange={(event) => onPostponeDateChange(event.target.value)} />
+          </label>
+          <button type="button" className="btn btn-primary btn-xs" disabled={!postponeForm.date || nextOccurrenceBusy} onClick={() => onSavePostpone(task, nextOccurrence)}>
+            {nextOccurrenceBusy ? 'Saving…' : 'Save date'}
+          </button>
+          <button type="button" className="btn btn-secondary btn-xs" disabled={nextOccurrenceBusy} onClick={onCancelPostpone}>Cancel</button>
+        </div>
+      )}
+
+      <details className="task-schedule-timeline">
+        <summary>Timeline · {schedule.length} date{schedule.length === 1 ? '' : 's'}</summary>
+        <ol>
+          {schedule.map((occurrence) => (
+            <li className={`is-${String(occurrence.status || 'pending').toLowerCase()}`} key={occurrence._id || getDateKey(occurrence.date)}>
+              <span className="task-timeline-marker" />
+              <div>
+                <strong>{getDateLabel(occurrence.date)}</strong>
+                <span>{occurrence.status === 'DONE' ? 'Done' : occurrence.status === 'CANCELLED' ? 'Cancelled' : 'Scheduled'}</span>
+                {occurrence.history?.filter((entry) => entry.action === 'POSTPONED').map((entry, index) => (
+                  <small key={`${entry.performedAt || index}-${index}`}>
+                    Moved from {getDateLabel(entry.fromDate)} to {getDateLabel(entry.toDate)}
+                  </small>
+                ))}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </details>
+    </div>
+  );
+}
 
 export default function Tasks() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const currentUserId = String(user?.id || user?._id || '');
   const isLead = ['MANAGER', 'TL', 'SL'].includes(user?.role);
-  const canCreate = user?.role === 'MANAGER' || (user?.permissions || []).includes('tasks:create');
+  const canCreate = isLead || (user?.permissions || []).includes('tasks:create');
 
   // Task list and filters
   const [items, setItems] = useState([]);
@@ -46,10 +224,14 @@ export default function Tasks() {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [mineOnly, setMineOnly] = useState(false);
   const [unassignedOnly, setUnassignedOnly] = useState(searchParams.get('unassigned') === 'true');
+  const [taskPage, setTaskPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
   // Create Task Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState(emptyTaskForm);
+  const [scheduleActionBusy, setScheduleActionBusy] = useState('');
+  const [postponeForm, setPostponeForm] = useState(null);
 
   // SL/TL Direct Reassign Modal (Requirement 6)
   const [reassignTask, setReassignTask] = useState(null);
@@ -72,6 +254,15 @@ export default function Tasks() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!location.state?.openCreate) return;
+    if (canCreate) {
+      setError('');
+      setShowCreateModal(true);
+    }
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [canCreate, location.key, location.pathname, location.search, location.state, navigate]);
 
   const load = ({ silent = false } = {}) => {
     if (!silent && !items.length) setLoading(true);
@@ -96,6 +287,17 @@ export default function Tasks() {
     return () => window.clearInterval(refreshInterval);
   }, [search, statusFilter, mineOnly, unassignedOnly]);
 
+  const taskPageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const paginatedTasks = useMemo(() => items.slice((taskPage - 1) * pageSize, taskPage * pageSize), [items, taskPage, pageSize]);
+
+  useEffect(() => {
+    setTaskPage(1);
+  }, [search, statusFilter, mineOnly, unassignedOnly, pageSize]);
+
+  useEffect(() => {
+    if (taskPage > taskPageCount) setTaskPage(taskPageCount);
+  }, [taskPage, taskPageCount]);
+
   useEffect(() => {
     api.get('/team')
       .then((r) => setMembers(r.data.filter((u) => u.status === 'active')))
@@ -109,13 +311,20 @@ export default function Tasks() {
   // Create Task
   const handleCreate = async (e) => {
     e.preventDefault();
+    if (createForm.category === 'OPERATIONAL' && !createForm.scheduleDates.length) {
+      Swal.warning('Select a schedule date', 'Choose one or more dates for this operational task.');
+      return;
+    }
     setBusy(true);
     setError('');
 
     try {
       await api.post('/tasks', {
         ...createForm,
-        dueAt: createForm.dueAt || null,
+        scheduleDates: createForm.category === 'OPERATIONAL' ? createForm.scheduleDates : [],
+        dueAt: createForm.category === 'OPERATIONAL'
+          ? createForm.scheduleDates[0] || null
+          : createForm.dueAt || null,
         assigneeId: createForm.assigneeId || null
       });
       Swal.success('Task Created', `Task "${createForm.title}" created successfully.`);
@@ -129,9 +338,91 @@ export default function Tasks() {
     }
   };
 
+  const updateScheduleTask = (updatedTask) => {
+    setItems((current) => current.map((item) => (
+      item._id === updatedTask._id ? { ...item, ...updatedTask } : item
+    )));
+  };
+
+  const handleScheduleAction = async (task, occurrence, action) => {
+    if (getDateKey(occurrence.date) > getTodayKey()) {
+      Swal.warning('Not due yet', `This occurrence is scheduled for ${getDateLabel(occurrence.date)}.`);
+      return;
+    }
+
+    const actionLabel = action === 'DONE' ? 'mark this occurrence done' : 'cancel this occurrence';
+    const confirmation = await Swal.confirm(
+      action === 'DONE' ? 'Complete Scheduled Date' : 'Cancel Scheduled Date',
+      `Are you sure you want to ${actionLabel} for ${getDateLabel(occurrence.date)}?`,
+      action === 'DONE' ? 'Mark Done' : 'Cancel Date'
+    );
+    if (!confirmation.isConfirmed) return;
+
+    const busyKey = `${task._id}:${occurrence._id}`;
+    setScheduleActionBusy(busyKey);
+    try {
+      const { data } = await api.patch(`/tasks/${task._id}/schedule/${occurrence._id}`, { action });
+      updateScheduleTask(data);
+      const nextOccurrence = getNextScheduleOccurrence(data);
+      Swal.success(
+        'Schedule Updated',
+        nextOccurrence
+          ? `${getDateLabel(occurrence.date)} is ${action === 'DONE' ? 'done' : 'cancelled'}. Next date: ${getDateLabel(nextOccurrence.date)}.`
+          : `${task.title} has no remaining scheduled dates.`
+      );
+    } catch (err) {
+      Swal.error('Schedule Update Failed', err.response?.data?.message || 'Unable to update this scheduled date.');
+    } finally {
+      setScheduleActionBusy('');
+    }
+  };
+
+  const startPostpone = (task, occurrence) => {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    setPostponeForm({
+      taskId: String(task._id),
+      scheduleId: String(occurrence._id),
+      date: '',
+      minDate: getDateKey(tomorrow)
+    });
+  };
+
+  const savePostpone = async (task, occurrence) => {
+    if (!postponeForm?.date) return;
+    const busyKey = `${task._id}:${occurrence._id}`;
+    setScheduleActionBusy(busyKey);
+    try {
+      const { data } = await api.patch(`/tasks/${task._id}/schedule/${occurrence._id}`, {
+        action: 'POSTPONE',
+        date: postponeForm.date
+      });
+      updateScheduleTask(data);
+      setPostponeForm(null);
+      const nextOccurrence = getNextScheduleOccurrence(data);
+      Swal.success(
+        'Occurrence Postponed',
+        nextOccurrence
+          ? `Moved to ${getDateLabel(postponeForm.date)}. Next scheduled date: ${getDateLabel(nextOccurrence.date)}.`
+          : `Moved to ${getDateLabel(postponeForm.date)}.`
+      );
+    } catch (err) {
+      Swal.error('Unable to Postpone', err.response?.data?.message || 'Choose a valid future date and try again.');
+    } finally {
+      setScheduleActionBusy('');
+    }
+  };
+
   // Status Change with Confirmation (Requirement 9)
   const handleStatusChange = async (task, newStatus) => {
     if (newStatus === task.status) return;
+
+    if (newStatus === 'COMPLETED' && task.scheduleDates?.length) {
+      const nextOccurrence = getNextScheduleOccurrence(task);
+      if (!nextOccurrence) return;
+      await handleScheduleAction(task, nextOccurrence, 'DONE');
+      return;
+    }
 
     if (newStatus === 'COMPLETED') {
       const confirmRes = await Swal.confirm(
@@ -336,13 +627,13 @@ export default function Tasks() {
                 <th>CATEGORY</th>
                 <th>ASSIGNEE</th>
                 <th>PRIORITY</th>
-                <th>DUE DATE</th>
+                <th>SCHEDULE / NEXT DATE</th>
                 <th>STATUS</th>
                 <th>ACTIONS</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((t) => {
+              {paginatedTasks.map((t) => {
                 const isAssignee = String(t.assigneeId || '') === currentUserId;
                 const isCompleted = t.status === 'COMPLETED';
 
@@ -358,6 +649,7 @@ export default function Tasks() {
                           <small>
                             {t.taskNumber}
                             {t.location ? ' · ' + t.location : ''}
+                            {t.scheduleDates?.length ? ` · ${t.scheduleDates.length} scheduled date${t.scheduleDates.length === 1 ? '' : 's'}` : ''}
                             {t.frequency !== 'ONE_TIME' ? ' · ' + t.frequency.toLowerCase() : ''}
                           </small>
                         </span>
@@ -384,7 +676,19 @@ export default function Tasks() {
                       </span>
                     </td>
 
-                    <td>{t.dueAt ? new Date(t.dueAt).toLocaleDateString() : '—'}</td>
+                    <td className="task-schedule-table-cell">
+                      <TaskScheduleTimeline
+                        task={t}
+                        canAct={isAssignee || isLead}
+                        busy={scheduleActionBusy}
+                        postponeForm={postponeForm}
+                        onAction={handleScheduleAction}
+                        onStartPostpone={startPostpone}
+                        onPostponeDateChange={(date) => setPostponeForm((current) => current ? { ...current, date } : current)}
+                        onSavePostpone={savePostpone}
+                        onCancelPostpone={() => setPostponeForm(null)}
+                      />
+                    </td>
 
                     {/* Status Column: Completed is locked; Only assigned person can edit */}
                     <td>
@@ -502,12 +806,15 @@ export default function Tasks() {
           </div>
         )}
 
-        <div className="table-footer">
-          <span>{items.length} task(s) in view</span>
-          <span className="table-footer-right">
-            Shift continuity is preserved through structured handovers and lead reassignments.
-          </span>
-        </div>
+        <Pagination
+          page={taskPage}
+          pageSize={pageSize}
+          totalItems={items.length}
+          itemLabel="tasks"
+          note="Shift continuity is preserved through structured handovers and lead reassignments."
+          onPageChange={setTaskPage}
+          onPageSizeChange={setPageSize}
+        />
       </section>
 
       {/* Lead Direct Reassignment Modal (Requirement 6) */}
@@ -776,30 +1083,6 @@ export default function Tasks() {
               </label>
 
               <label>
-                Frequency
-                <select
-                  value={createForm.frequency}
-                  onChange={(e) => setCreateForm({ ...createForm, frequency: e.target.value })}
-                >
-                  <option value="ONE_TIME">One-time</option>
-                  <option value="DAILY">Daily</option>
-                  <option value="WEEKLY">Weekly</option>
-                  <option value="QUARTERLY">Quarterly</option>
-                </select>
-              </label>
-            </div>
-
-            <div className="form-grid">
-              <label>
-                Due date
-                <input
-                  type="date"
-                  value={createForm.dueAt}
-                  onChange={(e) => setCreateForm({ ...createForm, dueAt: e.target.value })}
-                />
-              </label>
-
-              <label>
                 Assign to
                 <select
                   value={createForm.assigneeId}
@@ -814,6 +1097,37 @@ export default function Tasks() {
                 </select>
               </label>
             </div>
+
+            {createForm.category === 'OPERATIONAL' ? (
+              <MultiDatePicker
+                selectedDates={createForm.scheduleDates}
+                onChange={(scheduleDates) => setCreateForm((current) => ({ ...current, scheduleDates }))}
+              />
+            ) : (
+              <div className="form-grid">
+                <label>
+                  Frequency
+                  <select
+                    value={createForm.frequency}
+                    onChange={(e) => setCreateForm({ ...createForm, frequency: e.target.value })}
+                  >
+                    <option value="ONE_TIME">One-time</option>
+                    <option value="DAILY">Daily</option>
+                    <option value="WEEKLY">Weekly</option>
+                    <option value="QUARTERLY">Quarterly</option>
+                  </select>
+                </label>
+
+                <label>
+                  Due date
+                  <input
+                    type="date"
+                    value={createForm.dueAt}
+                    onChange={(e) => setCreateForm({ ...createForm, dueAt: e.target.value })}
+                  />
+                </label>
+              </div>
+            )}
 
             <div className="modal-actions">
               <button

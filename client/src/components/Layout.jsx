@@ -1,6 +1,5 @@
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Activity,
   Bell,
   CalendarDays,
   ClipboardList,
@@ -14,33 +13,60 @@ import {
   LockKeyhole,
   FileBarChart2,
   Laptop,
+  Building2,
   Menu,
-  X
+  X,
+  PanelLeftClose,
+  PanelLeftOpen,
+  ChevronDown,
+  Plus
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import Swal from '../utils/swal.js';
+import ThemeToggle from './ThemeToggle.jsx';
 
 const links = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
-  { to: '/tickets', label: 'Ticket queue', icon: Ticket, permission: 'tickets:view' },
-  { to: '/tasks', label: 'Operational tasks', icon: ClipboardList, permission: 'tasks:view' },
-  { to: '/events', label: 'Events & schedules', icon: CalendarDays, permission: 'events:view' },
-  { to: '/assets', label: 'Asset desk', icon: Laptop },
-  { to: '/reports', label: 'Work tracker', icon: FileBarChart2 },
-  { to: '/handovers', label: 'Handovers', icon: Workflow, permission: 'tasks:view', permission2: 'tasks:handover' },
-  { to: '/issues', label: 'Engineer Issues', icon: AlertCircle },
-  { to: '/profile', label: 'My profile', icon: UserRound },
-  { to: '/team', label: 'Team & access', icon: Users, permission: 'team:view', lead: true }
+  { to: '/tickets', label: 'Ticket', icon: Ticket, permission: 'tickets:view' },
+  { to: '/assets', label: 'Asset', icon: Laptop },
+  { to: '/tasks', label: 'Task', icon: ClipboardList, permission: 'tasks:view' },
+  { to: '/events', label: 'Event', icon: CalendarDays, permission: 'events:view' },
+  { to: '/handovers', label: 'Handover', icon: Workflow, permission: 'tasks:view', permission2: 'tasks:handover' },
+  { to: '/reports', label: 'Work tracker', icon: FileBarChart2, permission: 'reports:view' },
+  { to: '/issues', label: 'Issue', icon: AlertCircle },
+  { to: '/team', label: 'Teams', icon: Users, permission: 'team:view', lead: true },
+  { to: '/profile', label: 'My profile', icon: UserRound }
 ];
 
 export default function Layout() {
-  const { user, company, logout } = useAuth();
+  const { user, logout } = useAuth();
   const nav = useNavigate();
   const loc = useLocation();
   const [unread, setUnread] = useState(0);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('opsdesk_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const knownNotificationIds = useRef(new Set());
+  const notificationBaselineReady = useRef(false);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        localStorage.setItem('opsdesk_sidebar_collapsed', String(next));
+      } catch {
+        // Keep the sidebar control usable for the current session.
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -53,10 +79,52 @@ export default function Layout() {
   }, [user?.tempPasswordChangeRequired, loc.pathname, nav]);
 
   useEffect(() => {
-    api.get('/notifications')
-      .then((r) => setUnread(r.data.filter((n) => !n.readAt).length))
-      .catch(() => {});
-  }, [loc.pathname]);
+    let active = true;
+    const refreshUnread = () => {
+      api.get('/notifications')
+        .then((r) => {
+          if (!active) return;
+          const notifications = Array.isArray(r.data) ? r.data : [];
+          const knownIds = knownNotificationIds.current;
+          if (
+            notificationBaselineReady.current &&
+            document.visibilityState === 'hidden' &&
+            'Notification' in window &&
+            window.Notification.permission === 'granted'
+          ) {
+            notifications
+              .filter((notification) => !notification.readAt && !knownIds.has(String(notification._id)))
+              .slice(0, 3)
+              .forEach((notification) => {
+                const systemNotice = new window.Notification(notification.title || 'OpsDesk Pro', {
+                  body: notification.message || 'You have a new workspace notification.',
+                  tag: `opsdesk-${notification._id}`
+                });
+                systemNotice.onclick = () => {
+                  systemNotice.close();
+                  window.focus();
+                  nav(notification.link || '/notifications');
+                };
+              });
+          }
+          notifications.forEach((notification) => knownIds.add(String(notification._id)));
+          notificationBaselineReady.current = true;
+          setUnread(notifications.filter((notification) => !notification.readAt).length);
+        })
+        .catch(() => {});
+    };
+    const handleNotificationsUpdated = () => refreshUnread();
+
+    refreshUnread();
+    const interval = window.setInterval(refreshUnread, 30000);
+    window.addEventListener('opsdesk:notifications-updated', handleNotificationsUpdated);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener('opsdesk:notifications-updated', handleNotificationsUpdated);
+    };
+  }, [loc.pathname, nav]);
 
   const handleLogout = async () => {
     const res = await Swal.confirm('Sign out', 'Are you sure you want to sign out of your workspace?', 'Yes, Sign out');
@@ -74,28 +142,22 @@ export default function Layout() {
       : user?.role === 'RE'
       ? 'Resolution Engineer'
       : 'Operations Manager';
+  const permissions = user?.permissions || [];
+  const canCreateTicket = user?.role === 'MANAGER' || user?.role === 'RE' || (
+    permissions.includes('tickets:view') && permissions.includes('tickets:import')
+  );
+  const canCreateOperationalTask = user?.role === 'MANAGER' || (
+    permissions.includes('tasks:view') && permissions.includes('tasks:create')
+  );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       {/* Sidebar Navigation */}
       <aside className={`sidebar ${mobileNavOpen ? 'is-open' : ''}`}>
-        <div className="brand">
-          <div className="brand-mark tcs-side-mark">O</div>
-          <div>
-            <strong>OpsDesk Pro</strong>
-            <span>ENTERPRISE IT OPERATIONS</span>
-          </div>
+        <div className="sidebar-brand" title="TCS DIS">
+          <Building2 size={19} aria-hidden="true" />
+          <span>TCS DIS</span>
         </div>
-
-        <div className="workspace-switch">
-          <div className="workspace-icon">IT</div>
-          <div className="workspace-name">
-            <strong>{company?.name || 'Enterprise'}</strong>
-            <span>Support Operations</span>
-          </div>
-          <Activity size={15} />
-        </div>
-
         <div className="nav-label">WORKSPACE</div>
 
         <nav className="side-nav">
@@ -112,20 +174,12 @@ export default function Layout() {
                 to={to}
                 end={end}
                 className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+                title={label}
               >
                 <Icon size={18} />
                 <span>{label}</span>
-                {to === '/notifications' && unread > 0 && <i className="nav-unread" />}
               </NavLink>
             ))}
-
-          {(user?.role === 'MANAGER' || (user?.permissions || []).includes('notifications:view')) && (
-            <NavLink to="/notifications" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-              <Bell size={18} />
-              <span>Notifications</span>
-              {unread > 0 && <i className="nav-count">{unread > 9 ? '9+' : unread}</i>}
-            </NavLink>
-          )}
         </nav>
 
         {/* Sidebar Footer with Confirmation Logout */}
@@ -153,6 +207,16 @@ export default function Layout() {
       <main className="main-area">
         <header className="topbar">
           <button
+            className="icon-btn sidebar-collapse-btn"
+            type="button"
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-pressed={sidebarCollapsed}
+            onClick={toggleSidebar}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
+          <button
             className="icon-btn mobile-menu-btn"
             type="button"
             aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
@@ -168,7 +232,7 @@ export default function Layout() {
                 (loc.pathname === '/notifications'
                   ? 'Notifications'
                   : loc.pathname === '/issues'
-                  ? 'Engineer Issues'
+                  ? 'Issue'
                   : loc.pathname === '/assets'
                   ? 'Asset desk'
                   : 'Workspace')}
@@ -176,17 +240,51 @@ export default function Layout() {
           </div>
 
           <div className="topbar-actions">
+            <details
+              className="topbar-add-task"
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+              }}
+            >
+              <summary className="topbar-add-task-toggle">
+                <Plus size={16} />
+                <span>Add task</span>
+                <ChevronDown size={14} className="topbar-add-task-chevron" />
+              </summary>
+              <nav className="topbar-add-task-menu" aria-label="Create an item by category">
+                {canCreateTicket && (
+                  <NavLink to="/tickets" state={{ openCreate: true }}>
+                    <Ticket size={17} /> <span>Ticket</span>
+                  </NavLink>
+                )}
+                {canCreateTicket && (
+                  <NavLink to="/tickets" state={{ openCreate: true, requestType: 'Walk-in User' }}>
+                    <UserRound size={17} /> <span>Walk-in user</span>
+                  </NavLink>
+                )}
+                <NavLink to="/assets" state={{ openCreate: true }}>
+                  <Laptop size={17} /> <span>Asset desk</span>
+                </NavLink>
+                {canCreateOperationalTask && (
+                  <NavLink to="/tasks" state={{ openCreate: true }}>
+                    <ClipboardList size={17} /> <span>Operational task</span>
+                  </NavLink>
+                )}
+              </nav>
+            </details>
+            <ThemeToggle className="theme-toggle-topbar" />
             <span className="secure-label">
               <span className="green-dot" /> Session active
             </span>
 
             <button
               className="icon-btn notification-btn"
-              title="Notifications"
+              title={unread ? `${unread} unread notifications` : 'Notifications'}
+              aria-label={unread ? `Notifications, ${unread} unread` : 'Notifications'}
               onClick={() => nav('/notifications')}
             >
               <Bell size={18} />
-              {unread > 0 && <i />}
+              {unread > 0 && <span className="notification-count">{unread > 99 ? '99+' : unread}</span>}
             </button>
 
             <button className="topbar-user" onClick={() => nav('/profile')}>
